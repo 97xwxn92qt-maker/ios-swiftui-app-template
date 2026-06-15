@@ -1,0 +1,105 @@
+name: iOS Build (Unsigned IPA)
+
+# Builds an UNSIGNED .ipa of the native SwiftUI app on a free macOS runner.
+# The Xcode project is generated from project.yml via XcodeGen, then built with
+# code signing disabled and packaged into an IPA you can sideload (Sideloadly /
+# AltStore) with a free Apple ID.
+#
+# The app/scheme name is read from project.yml's `name:` field, so this workflow
+# needs NO edits when you rename the app.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Resolve app name
+        id: app
+        run: |
+          set -euo pipefail
+          NAME=$(awk -F':' '/^name:/{gsub(/["[:space:]]/,"",$2); print $2; exit}' project.yml)
+          if [ -z "$NAME" ]; then echo "::error::Could not read 'name:' from project.yml"; exit 1; fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "App: $NAME"
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos || true
+
+      - name: Build unsigned .app
+        env:
+          SCHEME: ${{ steps.app.outputs.name }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "${SCHEME}.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            clean build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        id: package
+        env:
+          SCHEME: ${{ steps.app.outputs.name }}
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No .app produced by the build."
+            exit 1
+          fi
+          echo "App bundle: $APP_PATH"
+          VER=$(tr -d ' \t\n\r' < VERSION 2>/dev/null || echo "0.0.0")
+          IPA="${SCHEME}-${VER}-${{ github.run_number }}.ipa"
+          rm -rf Payload dist
+          mkdir -p Payload dist
+          cp -R "$APP_PATH" Payload/
+          zip -qq -r "dist/$IPA" Payload
+          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+          ls -lh "dist/$IPA"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.ipa }}
+          path: dist/*.ipa
+          if-no-files-found: error
+          retention-days: 14

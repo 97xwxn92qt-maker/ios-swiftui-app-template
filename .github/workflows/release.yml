@@ -1,0 +1,112 @@
+name: Release (Unsigned IPA)
+
+# Push a version tag (e.g. v1.0.0) and this builds the unsigned IPA and
+# publishes a GitHub Release with the .ipa attached and auto-generated notes.
+# Same build recipe as "iOS Build (Unsigned IPA)" — this one also cuts the
+# release, so a tag is all it takes to ship.
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Or run it manually (workflow_dispatch) and pass a tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0). Created at the current commit if it doesn't exist."
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Resolve app name & tag
+        id: meta
+        run: |
+          set -euo pipefail
+          NAME=$(awk -F':' '/^name:/{gsub(/["[:space:]]/,"",$2); print $2; exit}' project.yml)
+          if [ -z "$NAME" ]; then echo "::error::Could not read 'name:' from project.yml"; exit 1; fi
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "App: $NAME  Tag: $TAG"
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned .app
+        env:
+          SCHEME: ${{ steps.meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "${SCHEME}.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            clean build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package unsigned IPA
+        id: package
+        env:
+          SCHEME: ${{ steps.meta.outputs.name }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$APP_PATH" ]; then echo "::error::No .app produced by the build."; exit 1; fi
+          VER="${TAG#v}"
+          IPA="${SCHEME}-${VER}.ipa"
+          rm -rf Payload dist
+          mkdir -p Payload dist
+          cp -R "$APP_PATH" Payload/
+          zip -qq -r "dist/$IPA" Payload
+          echo "ipa=dist/$IPA" >> "$GITHUB_OUTPUT"
+          ls -lh "dist/$IPA"
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          NAME: ${{ steps.meta.outputs.name }}
+          IPA: ${{ steps.package.outputs.ipa }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — attaching IPA."
+            gh release upload "$TAG" "$IPA" --clobber
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" "$IPA" \
+              --title "$NAME $TAG" \
+              --generate-notes
+          fi

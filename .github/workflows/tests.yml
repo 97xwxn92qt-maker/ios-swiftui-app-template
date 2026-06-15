@@ -1,0 +1,70 @@
+name: Unit Tests (Simulator)
+
+# Runs the unit tests on an iOS Simulator. Dispatch + pull-request only, to
+# conserve free macOS minutes — the IPA build is the routine job on main.
+# Reads the scheme name from project.yml's `name:` field.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run unit tests
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Resolve app name
+        id: app
+        run: |
+          set -euo pipefail
+          NAME=$(awk -F':' '/^name:/{gsub(/["[:space:]]/,"",$2); print $2; exit}' project.yml)
+          if [ -z "$NAME" ]; then echo "::error::Could not read 'name:' from project.yml"; exit 1; fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Pick a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          # First available iPhone simulator on the runner.
+          NAME=$(xcrun simctl list devices available | grep -Eo 'iPhone [0-9]+( Pro)?( Max)?' | head -1)
+          if [ -z "$NAME" ]; then NAME="iPhone 16"; fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Using simulator: $NAME"
+
+      - name: Run tests
+        env:
+          SCHEME: ${{ steps.app.outputs.name }}
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project "${SCHEME}.xcodeproj" \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }}" \
+            CODE_SIGNING_ALLOWED=NO

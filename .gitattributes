@@ -1,0 +1,14 @@
+# Enforce LF so files built/executed on the macOS runner never carry CRLF
+# (important when committing from Windows).
+* text=auto eol=lf
+
+*.swift text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+VERSION text eol=lf
+
+# Treat the placeholder icon as binary.
+*.png binary
