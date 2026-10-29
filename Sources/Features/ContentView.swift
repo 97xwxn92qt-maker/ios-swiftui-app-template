@@ -68,11 +68,15 @@ struct SteamReviewSummary {
 
     var positivePercent: Int {
         guard totalReviews > 0 else { return 0 }
-        return Int((Double(positiveReviews) / Double(totalReviews) * 100).rounded())
+        return Int(
+            (Double(positiveReviews) / Double(totalReviews) * 100).rounded()
+        )
     }
 
     var totalText: String {
-        totalReviews.formatted(.number.locale(Locale(identifier: "zh_CN")))
+        totalReviews.formatted(
+            .number.locale(Locale(identifier: "zh_CN"))
+        )
     }
 }
 
@@ -85,6 +89,7 @@ enum SteamAPI {
     private static func makeRequest(_ url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
+
         request.setValue(
             "application/json, text/javascript, */*; q=0.01",
             forHTTPHeaderField: "Accept"
@@ -104,7 +109,9 @@ enum SteamAPI {
             throw NSError(
                 domain: "SteamAPI",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "无法获取服务器响应"]
+                userInfo: [
+                    NSLocalizedDescriptionKey: "无法获取服务器响应"
+                ]
             )
         }
 
@@ -131,7 +138,9 @@ enum SteamAPI {
             throw NSError(
                 domain: "SteamAPI",
                 code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Steam 返回的数据无法解析"]
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Steam 返回的数据无法解析"
+                ]
             )
         }
     }
@@ -155,6 +164,7 @@ enum SteamAPI {
         guard var components = URLComponents(string: string) else {
             return nil
         }
+
         components.queryItems = queryItems
         return components.url
     }
@@ -196,13 +206,13 @@ enum SteamAPI {
                     ?? Int(string(item["appid"]))
                     ?? 0
 
-                let name = string(item["name"])
-                addCandidate(id, name)
+                addCandidate(id, string(item["name"]))
             }
         }
 
         // 兼容搜索结果 HTML
         let html = string(root["results_html"])
+
         if !html.isEmpty {
             let patterns = [
                 #"/app/(\d+)(?:/|")"#,
@@ -210,18 +220,26 @@ enum SteamAPI {
             ]
 
             for pattern in patterns {
-                guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                guard let regex = try? NSRegularExpression(
+                    pattern: pattern
+                ) else {
                     continue
                 }
 
                 let nsHTML = html as NSString
                 let matches = regex.matches(
                     in: html,
-                    range: NSRange(location: 0, length: nsHTML.length)
+                    range: NSRange(
+                        location: 0,
+                        length: nsHTML.length
+                    )
                 )
 
                 for match in matches where match.numberOfRanges > 1 {
-                    let idString = nsHTML.substring(with: match.range(at: 1))
+                    let idString = nsHTML.substring(
+                        with: match.range(at: 1)
+                    )
+
                     if let id = Int(idString) {
                         let name = extractName(
                             around: match.range.location,
@@ -237,22 +255,33 @@ enum SteamAPI {
         if let items = root["items"] as? [[String: Any]] {
             for item in items {
                 let logo = string(item["logo"])
+
                 let patterns = [
                     #"/steam/apps/(\d+)/"#,
                     #"/apps/(\d+)/"#
                 ]
 
                 for pattern in patterns {
-                    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                    guard let regex = try? NSRegularExpression(
+                        pattern: pattern
+                    ) else {
                         continue
                     }
 
                     let nsLogo = logo as NSString
-                    let range = NSRange(location: 0, length: nsLogo.length)
+                    let range = NSRange(
+                        location: 0,
+                        length: nsLogo.length
+                    )
 
-                    if let match = regex.firstMatch(in: logo, range: range),
-                       match.numberOfRanges > 1 {
-                        let idString = nsLogo.substring(with: match.range(at: 1))
+                    if let match = regex.firstMatch(
+                        in: logo,
+                        range: range
+                    ), match.numberOfRanges > 1 {
+                        let idString = nsLogo.substring(
+                            with: match.range(at: 1)
+                        )
+
                         if let id = Int(idString) {
                             addCandidate(id, string(item["name"]))
                         }
@@ -280,9 +309,18 @@ enum SteamAPI {
                 guard let detailURL = makeURL(
                     "https://store.steampowered.com/api/appdetails",
                     queryItems: [
-                        URLQueryItem(name: "appids", value: "\(candidate.id)"),
-                        URLQueryItem(name: "cc", value: countryCode),
-                        URLQueryItem(name: "l", value: language)
+                        URLQueryItem(
+                            name: "appids",
+                            value: "\(candidate.id)"
+                        ),
+                        URLQueryItem(
+                            name: "cc",
+                            value: countryCode
+                        ),
+                        URLQueryItem(
+                            name: "l",
+                            value: language
+                        )
                     ]
                 ) else {
                     continue
@@ -306,7 +344,9 @@ enum SteamAPI {
                     continue
                 }
 
-                let packageGroups = data["package_groups"] as? [[String: Any]] ?? []
+                let packageGroups =
+                    data["package_groups"] as? [[String: Any]] ?? []
+
                 var isLimitedFree = false
                 var originalPriceCents: Int?
 
@@ -314,14 +354,30 @@ enum SteamAPI {
                     let subs = group["subs"] as? [[String: Any]] ?? []
 
                     for sub in subs {
-                        let optionText = string(sub["option_text"]).lowercased()
-                        let discountPrice = (sub["price_in_cents_with_discount"] as? Int)
-                            ?? Int(string(sub["price_in_cents_with_discount"]))
-                        let originalCents = (sub["price_in_cents_without_discount"] as? Int)
-                            ?? Int(string(sub["price_in_cents_without_discount"]))
+                        let optionText = string(
+                            sub["option_text"]
+                        ).lowercased()
+
+                        let discountPrice =
+                            (sub["price_in_cents_with_discount"] as? Int)
+                            ?? Int(
+                                string(
+                                    sub["price_in_cents_with_discount"]
+                                )
+                            )
+
+                        let originalCents =
+                            (sub["price_in_cents_without_discount"] as? Int)
+                            ?? Int(
+                                string(
+                                    sub["price_in_cents_without_discount"]
+                                )
+                            )
 
                         let promotionTextMatches =
-                            optionText.contains("limited free promotional package")
+                            optionText.contains(
+                                "limited free promotional package"
+                            )
                             || optionText.contains("limited-time free")
                             || optionText.contains("limited time free")
                             || optionText.contains("限时免费")
@@ -334,16 +390,20 @@ enum SteamAPI {
                         }
                     }
 
-                    if isLimitedFree { break }
+                    if isLimitedFree {
+                        break
+                    }
                 }
 
-                guard isLimitedFree else { continue }
+                guard isLimitedFree else {
+                    continue
+                }
 
                 let imageURL = string(data["header_image"])
-                let priceText: String
 
+                let priceText: String
                 if let cents = originalPriceCents, cents > 0 {
-                    priceText = Self.formatSGD(cents)
+                    priceText = formatSGD(cents)
                 } else {
                     priceText = "限时免费"
                 }
@@ -367,7 +427,9 @@ enum SteamAPI {
             if $0.isDLC != $1.isDLC {
                 return !$0.isDLC
             }
-            return $0.name.localizedCompare($1.name) == .orderedAscending
+
+            return $0.name.localizedCompare($1.name)
+                == .orderedAscending
         }
     }
 
@@ -377,8 +439,16 @@ enum SteamAPI {
     ) -> String {
         let start = max(0, location - 500)
         let end = min(html.count, location + 1000)
-        let lowerIndex = html.index(html.startIndex, offsetBy: start)
-        let upperIndex = html.index(html.startIndex, offsetBy: end)
+
+        let lowerIndex = html.index(
+            html.startIndex,
+            offsetBy: start
+        )
+        let upperIndex = html.index(
+            html.startIndex,
+            offsetBy: end
+        )
+
         let fragment = String(html[lowerIndex..<upperIndex])
 
         guard let regex = try? NSRegularExpression(
@@ -388,10 +458,15 @@ enum SteamAPI {
         }
 
         let nsFragment = fragment as NSString
-        let range = NSRange(location: 0, length: nsFragment.length)
+        let range = NSRange(
+            location: 0,
+            length: nsFragment.length
+        )
 
-        guard let match = regex.firstMatch(in: fragment, range: range),
-              match.numberOfRanges > 1 else {
+        guard let match = regex.firstMatch(
+            in: fragment,
+            range: range
+        ), match.numberOfRanges > 1 else {
             return ""
         }
 
@@ -400,8 +475,10 @@ enum SteamAPI {
 
     private static func formatSGD(_ cents: Int) -> String {
         let amount = Double(cents) / 100
+
         return amount.formatted(
-            .currency(code: "SGD").locale(Locale(identifier: "en_SG"))
+            .currency(code: "SGD")
+                .locale(Locale(identifier: "en_SG"))
         )
     }
 
@@ -419,13 +496,17 @@ enum SteamAPI {
         }
 
         let json = try await requestJSON(url)
-        let root = dictionary(dictionary(json)["\(appID)"])
+        let root = dictionary(
+            dictionary(json)["\(appID)"]
+        )
 
         guard root["success"] as? Bool == true else {
             throw NSError(
                 domain: "SteamAPI",
                 code: -4,
-                userInfo: [NSLocalizedDescriptionKey: "无法获取游戏详情"]
+                userInfo: [
+                    NSLocalizedDescriptionKey: "无法获取游戏详情"
+                ]
             )
         }
 
@@ -436,7 +517,8 @@ enum SteamAPI {
             ?? (priceOverview["final"] as? Int)
             ?? 0
 
-        let screenshots = (data["screenshots"] as? [[String: Any]] ?? [])
+        let screenshots =
+            (data["screenshots"] as? [[String: Any]] ?? [])
             .compactMap { $0["path_full"] as? String }
             .filter { !$0.isEmpty }
 
@@ -470,9 +552,18 @@ enum SteamAPI {
                     "https://store.steampowered.com/appreviews/\(appID)",
                     queryItems: [
                         URLQueryItem(name: "json", value: "1"),
-                        URLQueryItem(name: "language", value: reviewLanguage),
-                        URLQueryItem(name: "purchase_type", value: "all"),
-                        URLQueryItem(name: "num_per_page", value: count)
+                        URLQueryItem(
+                            name: "language",
+                            value: reviewLanguage
+                        ),
+                        URLQueryItem(
+                            name: "purchase_type",
+                            value: "all"
+                        ),
+                        URLQueryItem(
+                            name: "num_per_page",
+                            value: count
+                        )
                     ]
                 ) else {
                     continue
@@ -502,7 +593,6 @@ enum SteamAPI {
                     )
                 }
 
-                // Steam 可能返回成功但没有摘要
                 if root["success"] as? Int == 1 {
                     return SteamReviewSummary(
                         totalReviews: 0,
@@ -518,7 +608,9 @@ enum SteamAPI {
         throw lastError ?? NSError(
             domain: "SteamAPI",
             code: -5,
-            userInfo: [NSLocalizedDescriptionKey: "Steam 评价暂时无法加载"]
+            userInfo: [
+                NSLocalizedDescriptionKey: "Steam 评价暂时无法加载"
+            ]
         )
     }
 }
@@ -532,11 +624,16 @@ final class SteamStore: ObservableObject {
     @Published var errorMessage: String?
 
     func loadGames() async {
-        guard !isLoading else { return }
+        guard !isLoading else {
+            return
+        }
 
         isLoading = true
         errorMessage = nil
-        defer { isLoading = false }
+
+        defer {
+            isLoading = false
+        }
 
         do {
             games = try await SteamAPI.fetchFreeGames()
@@ -554,7 +651,9 @@ private struct SteamCardButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.975 : 1)
             .offset(y: configuration.isPressed ? 1.5 : 0)
             .shadow(
-                color: .black.opacity(configuration.isPressed ? 0.08 : 0.24),
+                color: .black.opacity(
+                    configuration.isPressed ? 0.08 : 0.24
+                ),
                 radius: configuration.isPressed ? 4 : 12,
                 x: 0,
                 y: configuration.isPressed ? 2 : 7
@@ -584,7 +683,8 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                SteamStyle.background.ignoresSafeArea()
+                SteamStyle.background
+                    .ignoresSafeArea()
 
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 24) {
@@ -604,8 +704,7 @@ struct ContentView: View {
                                 gameSection(
                                     title: "限时免费游戏",
                                     subtitle: "限时领取，错过可能恢复原价",
-                                    items: games,
-                                    icon: "gamecontroller.fill"
+                                    items: games
                                 )
                             }
 
@@ -613,8 +712,7 @@ struct ContentView: View {
                                 gameSection(
                                     title: "免费 DLC 内容",
                                     subtitle: "扩展内容与附加组件",
-                                    items: dlcs,
-                                    icon: "square.stack.3d.up.fill"
+                                    items: dlcs
                                 )
                             }
 
@@ -652,7 +750,11 @@ struct ContentView: View {
                         LinearGradient(
                             colors: [
                                 SteamStyle.blue,
-                                Color(red: 0.16, green: 0.37, blue: 0.75)
+                                Color(
+                                    red: 0.16,
+                                    green: 0.37,
+                                    blue: 0.75
+                                )
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -686,7 +788,10 @@ struct ContentView: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(SteamStyle.cyan)
                     .frame(width: 42, height: 42)
-                    .background(SteamStyle.cardLight, in: Circle())
+                    .background(
+                        SteamStyle.cardLight,
+                        in: Circle()
+                    )
             }
             .buttonStyle(.plain)
             .accessibilityLabel("刷新游戏")
@@ -771,8 +876,7 @@ struct ContentView: View {
     private func gameSection(
         title: String,
         subtitle: String,
-        items: [SteamGame],
-        icon: String
+        items: [SteamGame]
     ) -> some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack(spacing: 10) {
@@ -797,10 +901,12 @@ struct ContentView: View {
                     .foregroundStyle(SteamStyle.cyan)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(SteamStyle.blue.opacity(0.15), in: Capsule())
+                    .background(
+                        SteamStyle.blue.opacity(0.15),
+                        in: Capsule()
+                    )
             }
 
-            // 单列列表：卡片宽度受父视图约束，左右不会越界
             LazyVStack(spacing: 15) {
                 ForEach(items) { game in
                     NavigationLink(value: game) {
@@ -848,18 +954,27 @@ struct ContentView: View {
                     await store.loadGames()
                 }
             } label: {
-                Label("重新加载", systemImage: "arrow.clockwise")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 12)
-                    .background(SteamStyle.blue, in: Capsule())
+                Label(
+                    "重新加载",
+                    systemImage: "arrow.clockwise"
+                )
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 12)
+                .background(
+                    SteamStyle.blue,
+                    in: Capsule()
+                )
             }
             .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
         .padding(24)
-        .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 20))
+        .background(
+            SteamStyle.card,
+            in: RoundedRectangle(cornerRadius: 20)
+        )
     }
 
     private var emptyView: some View {
@@ -897,7 +1012,6 @@ private struct GameCard: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            // 左侧封面：固定比例，限制尺寸，避免图片撑出屏幕
             AsyncImage(url: URL(string: game.imageURL)) { phase in
                 switch phase {
                 case .success(let image):
@@ -922,16 +1036,20 @@ private struct GameCard: View {
             }
             .frame(width: 132, height: 82)
             .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: 11))
+            .clipShape(
+                RoundedRectangle(cornerRadius: 11)
+            )
 
-            // 右侧文字内容
             VStack(alignment: .leading, spacing: 8) {
                 Text(game.name)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(
+                        maxWidth: .infinity,
+                        alignment: .leading
+                    )
 
                 HStack(spacing: 6) {
                     Image(systemName: game.isDLC
@@ -941,15 +1059,23 @@ private struct GameCard: View {
                     Text(game.kind.rawValue)
                 }
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(game.isDLC ? SteamStyle.cyan : SteamStyle.blue)
+                .foregroundStyle(
+                    game.isDLC
+                        ? SteamStyle.cyan
+                        : SteamStyle.blue
+                )
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(
-                    (game.isDLC ? SteamStyle.cyan : SteamStyle.blue).opacity(0.12),
+                    (
+                        game.isDLC
+                            ? SteamStyle.cyan
+                            : SteamStyle.blue
+                    ).opacity(0.12),
                     in: Capsule()
                 )
 
-                HStack(alignment: .center, spacing: 5) {
+                HStack(spacing: 5) {
                     Text("当前免费")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(SteamStyle.green)
@@ -963,7 +1089,6 @@ private struct GameCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // 右侧领取状态
             VStack(spacing: 5) {
                 Image(systemName: "gift.fill")
                     .font(.system(size: 17))
@@ -992,7 +1117,9 @@ private struct GameCard: View {
             RoundedRectangle(cornerRadius: 17)
                 .stroke(SteamStyle.border, lineWidth: 1)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 17))
+        .contentShape(
+            RoundedRectangle(cornerRadius: 17)
+        )
     }
 
     private var imagePlaceholder: some View {
@@ -1028,24 +1155,18 @@ private struct SteamGameDetailView: View {
 
     var body: some View {
         ZStack {
-            SteamStyle.background.ignoresSafeArea()
+            SteamStyle.background
+                .ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 22) {
                     coverSection
-
                     titleSection
-
                     reviewSection
-
                     priceSection
-
                     descriptionSection
-
                     infoSection
-
                     screenshotsSection
-
                     claimButton
                 }
                 .frame(maxWidth: 600)
@@ -1057,8 +1178,14 @@ private struct SteamGameDetailView: View {
         }
         .navigationTitle("游戏详情")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(SteamStyle.background, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarBackground(
+            SteamStyle.background,
+            for: .navigationBar
+        )
+        .toolbarBackground(
+            .visible,
+            for: .navigationBar
+        )
         .task {
             await loadDetails()
             await loadReviews()
@@ -1067,7 +1194,9 @@ private struct SteamGameDetailView: View {
 
     private var coverSection: some View {
         AsyncImage(
-            url: URL(string: details?.headerImage ?? game.imageURL)
+            url: URL(
+                string: details?.headerImage ?? game.imageURL
+            )
         ) { phase in
             switch phase {
             case .success(let image):
@@ -1088,7 +1217,9 @@ private struct SteamGameDetailView: View {
         .frame(maxWidth: .infinity)
         .aspectRatio(16.0 / 9.0, contentMode: .fit)
         .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .clipShape(
+            RoundedRectangle(cornerRadius: 18)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(SteamStyle.border, lineWidth: 1)
@@ -1100,7 +1231,10 @@ private struct SteamGameDetailView: View {
             Text(details?.name ?? game.name)
                 .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(.white)
-                .fixedSize(horizontal: false, vertical: true)
+                .fixedSize(
+                    horizontal: false,
+                    vertical: true
+                )
 
             HStack(spacing: 8) {
                 Text(game.kind.rawValue)
@@ -1108,18 +1242,27 @@ private struct SteamGameDetailView: View {
                     .foregroundStyle(SteamStyle.cyan)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(SteamStyle.cyan.opacity(0.12), in: Capsule())
+                    .background(
+                        SteamStyle.cyan.opacity(0.12),
+                        in: Capsule()
+                    )
 
-                Label("Steam 商店", systemImage: "checkmark.seal.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(SteamStyle.secondary)
+                Label(
+                    "Steam 商店",
+                    systemImage: "checkmark.seal.fill"
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(SteamStyle.secondary)
             }
         }
     }
 
     private var reviewSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeading("玩家评价", icon: "star.fill")
+            sectionHeading(
+                "玩家评价",
+                icon: "star.fill"
+            )
 
             if isLoadingReviews && reviews == nil {
                 HStack(spacing: 10) {
@@ -1131,14 +1274,22 @@ private struct SteamGameDetailView: View {
                         .foregroundStyle(SteamStyle.secondary)
                 }
                 .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                .frame(
+                    maxWidth: .infinity,
+                    alignment: .leading
+                )
+                .background(
+                    SteamStyle.card,
+                    in: RoundedRectangle(cornerRadius: 14)
+                )
             } else if let reviews {
                 if reviews.totalReviews > 0 {
                     HStack(spacing: 16) {
                         VStack(spacing: 6) {
                             Text("\(reviews.positivePercent)%")
-                                .font(.system(size: 30, weight: .bold))
+                                .font(
+                                    .system(size: 30, weight: .bold)
+                                )
                                 .foregroundStyle(SteamStyle.green)
 
                             Text("好评率")
@@ -1153,35 +1304,54 @@ private struct SteamGameDetailView: View {
 
                         VStack(alignment: .leading, spacing: 7) {
                             Text("\(reviews.totalText) 条用户评价")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(
+                                    .system(size: 14, weight: .semibold)
+                                )
                                 .foregroundStyle(.white)
 
-                            Text("好评 \(reviews.positiveReviews.formatted()) · 差评 \(reviews.negativeReviews.formatted())")
-                                .font(.system(size: 11))
-                                .foregroundStyle(SteamStyle.secondary)
+                            Text(
+                                "好评 \(reviews.positiveReviews.formatted()) · 差评 \(reviews.negativeReviews.formatted())"
+                            )
+                            .font(.system(size: 11))
+                            .foregroundStyle(SteamStyle.secondary)
                         }
 
                         Spacer(minLength: 0)
                     }
                     .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                    .frame(
+                        maxWidth: .infinity,
+                        alignment: .leading
+                    )
+                    .background(
+                        SteamStyle.card,
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
                 } else {
                     reviewEmptyState("Steam 暂无可统计的评价")
                 }
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(reviewError ?? "暂时无法获取玩家评价")
-                        .font(.system(size: 12))
-                        .foregroundStyle(SteamStyle.secondary)
+                    Text(
+                        reviewError ?? "暂时无法获取玩家评价"
+                    )
+                    .font(.system(size: 12))
+                    .foregroundStyle(SteamStyle.secondary)
 
                     HStack(spacing: 12) {
                         Button {
-                            Task { await loadReviews() }
+                            Task {
+                                await loadReviews()
+                            }
                         } label: {
-                            Label("重试", systemImage: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(SteamStyle.cyan)
+                            Label(
+                                "重试",
+                                systemImage: "arrow.clockwise"
+                            )
+                            .font(
+                                .system(size: 12, weight: .semibold)
+                            )
+                            .foregroundStyle(SteamStyle.cyan)
                         }
                         .buttonStyle(.plain)
 
@@ -1189,22 +1359,33 @@ private struct SteamGameDetailView: View {
                             openSteamReviews()
                         } label: {
                             Text("打开 Steam 评价")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(
+                                    .system(size: 12, weight: .semibold)
+                                )
                                 .foregroundStyle(.white)
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                .frame(
+                    maxWidth: .infinity,
+                    alignment: .leading
+                )
+                .background(
+                    SteamStyle.card,
+                    in: RoundedRectangle(cornerRadius: 14)
+                )
             }
         }
     }
 
     private var priceSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeading("领取信息", icon: "gift.fill")
+            sectionHeading(
+                "领取信息",
+                icon: "gift.fill"
+            )
 
             HStack {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1225,50 +1406,88 @@ private struct SteamGameDetailView: View {
                         .foregroundStyle(SteamStyle.secondary)
 
                     Text(game.originalPrice)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(
+                            .system(size: 14, weight: .semibold)
+                        )
                         .foregroundStyle(.white.opacity(0.85))
                 }
             }
             .padding(17)
-            .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 15))
+            .background(
+                SteamStyle.card,
+                in: RoundedRectangle(cornerRadius: 15)
+            )
 
-            Text("限免活动可能随时结束，最终价格及领取条件请以 Steam 商店页面为准。")
-                .font(.system(size: 11))
-                .foregroundStyle(SteamStyle.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(
+                "限免活动可能随时结束，最终价格及领取条件请以 Steam 商店页面为准。"
+            )
+            .font(.system(size: 11))
+            .foregroundStyle(SteamStyle.secondary)
+            .fixedSize(
+                horizontal: false,
+                vertical: true
+            )
         }
     }
 
     private var descriptionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeading("游戏介绍", icon: "text.alignleft")
+            sectionHeading(
+                "游戏介绍",
+                icon: "text.alignleft"
+            )
 
             if isLoadingDetails && details == nil {
                 ProgressView()
                     .tint(SteamStyle.cyan)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(
+                        maxWidth: .infinity,
+                        alignment: .leading
+                    )
                     .padding(16)
-                    .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                    .background(
+                        SteamStyle.card,
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
             } else if let description = details?.description,
                       !description.isEmpty {
                 Text(description)
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.82))
                     .lineSpacing(5)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .fixedSize(
+                        horizontal: false,
+                        vertical: true
+                    )
                     .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                    .frame(
+                        maxWidth: .infinity,
+                        alignment: .leading
+                    )
+                    .background(
+                        SteamStyle.card,
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
             } else {
-                Text(detailError ?? "暂时没有获取到游戏介绍")
-                    .font(.system(size: 12))
-                    .foregroundStyle(SteamStyle.secondary)
-                    .padding(16)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                Text(
+                    detailError ?? "暂时没有获取到游戏介绍"
+                )
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+                .padding(16)
+                .frame(
+                    maxWidth: .infinity,
+                    alignment: .leading
+                )
+                .background(
+                    SteamStyle.card,
+                    in: RoundedRectangle(cornerRadius: 14)
+                )
 
                 Button("重新加载详情") {
-                    Task { await loadDetails() }
+                    Task {
+                        await loadDetails()
+                    }
                 }
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(SteamStyle.cyan)
@@ -1279,7 +1498,10 @@ private struct SteamGameDetailView: View {
 
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeading("内容信息", icon: "info.circle.fill")
+            sectionHeading(
+                "内容信息",
+                icon: "info.circle.fill"
+            )
 
             VStack(spacing: 0) {
                 infoRow(
@@ -1287,48 +1509,86 @@ private struct SteamGameDetailView: View {
                     value: game.kind.rawValue
                 )
 
-                Divider().overlay(SteamStyle.border)
+                Divider()
+                    .overlay(SteamStyle.border)
 
                 infoRow(
                     title: "开发商",
-                    value: details?.developers.joined(separator: "、")
-                        .flatMap { $0.isEmpty ? nil : $0 } ?? "暂无信息"
+                    value: displayNames(
+                        details?.developers
+                    )
                 )
 
-                Divider().overlay(SteamStyle.border)
+                Divider()
+                    .overlay(SteamStyle.border)
 
                 infoRow(
                     title: "发行商",
-                    value: details?.publishers.joined(separator: "、")
-                        .flatMap { $0.isEmpty ? nil : $0 } ?? "暂无信息"
+                    value: displayNames(
+                        details?.publishers
+                    )
                 )
             }
             .padding(.horizontal, 15)
-            .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+            .background(
+                SteamStyle.card,
+                in: RoundedRectangle(cornerRadius: 14)
+            )
         }
+    }
+
+    // 修复原先 flatMap 导致的编译错误
+    private func displayNames(_ names: [String]?) -> String {
+        guard let names = names, !names.isEmpty else {
+            return "暂无信息"
+        }
+
+        let result = names
+            .filter { !$0.isEmpty }
+            .joined(separator: "、")
+
+        return result.isEmpty ? "暂无信息" : result
     }
 
     @ViewBuilder
     private var screenshotsSection: some View {
-        if let screenshots = details?.screenshots, !screenshots.isEmpty {
+        if let screenshots = details?.screenshots,
+           !screenshots.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
-                sectionHeading("游戏截图", icon: "photo.on.rectangle")
+                sectionHeading(
+                    "游戏截图",
+                    icon: "photo.on.rectangle"
+                )
 
-                ScrollView(.horizontal, showsIndicators: false) {
+                ScrollView(
+                    .horizontal,
+                    showsIndicators: false
+                ) {
                     HStack(spacing: 12) {
-                        ForEach(Array(screenshots.prefix(8).enumerated()), id: \.offset) { _, url in
-                            AsyncImage(url: URL(string: url)) { phase in
+                        ForEach(
+                            Array(
+                                screenshots.prefix(8).enumerated()
+                            ),
+                            id: \.offset
+                        ) { _, url in
+                            AsyncImage(
+                                url: URL(string: url)
+                            ) { phase in
                                 if let image = phase.image {
                                     image
                                         .resizable()
-                                        .aspectRatio(contentMode: .fill)
+                                        .aspectRatio(
+                                            contentMode: .fill
+                                        )
                                 } else {
                                     SteamStyle.cardLight
                                 }
                             }
                             .frame(width: 245, height: 138)
                             .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 12)
+                            )
                         }
                     }
                     .padding(.vertical, 3)
@@ -1343,15 +1603,21 @@ private struct SteamGameDetailView: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "gift.fill")
-                    .font(.system(size: 17, weight: .bold))
+                    .font(
+                        .system(size: 17, weight: .bold)
+                    )
 
                 Text("前往 Steam 确认领取")
-                    .font(.system(size: 15, weight: .bold))
+                    .font(
+                        .system(size: 15, weight: .bold)
+                    )
 
                 Spacer()
 
                 Image(systemName: "arrow.up.right")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(
+                        .system(size: 13, weight: .bold)
+                    )
             }
             .foregroundStyle(.white)
             .padding(.horizontal, 20)
@@ -1360,8 +1626,16 @@ private struct SteamGameDetailView: View {
             .background(
                 LinearGradient(
                     colors: [
-                        Color(red: 0.12, green: 0.48, blue: 0.82),
-                        Color(red: 0.12, green: 0.35, blue: 0.66)
+                        Color(
+                            red: 0.12,
+                            green: 0.48,
+                            blue: 0.82
+                        ),
+                        Color(
+                            red: 0.12,
+                            green: 0.35,
+                            blue: 0.66
+                        )
                     ],
                     startPoint: .leading,
                     endPoint: .trailing
@@ -1379,7 +1653,9 @@ private struct SteamGameDetailView: View {
     ) -> some View {
         HStack(spacing: 9) {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
+                .font(
+                    .system(size: 15, weight: .semibold)
+                )
                 .foregroundStyle(SteamStyle.cyan)
 
             Text(title)
@@ -1402,43 +1678,68 @@ private struct SteamGameDetailView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.85))
                 .multilineTextAlignment(.trailing)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(
+                    maxWidth: .infinity,
+                    alignment: .trailing
+                )
         }
         .padding(.vertical, 14)
     }
 
-    private func reviewEmptyState(_ message: String) -> some View {
+    private func reviewEmptyState(
+        _ message: String
+    ) -> some View {
         Text(message)
             .font(.system(size: 12))
             .foregroundStyle(SteamStyle.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(
+                maxWidth: .infinity,
+                alignment: .leading
+            )
             .padding(16)
-            .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 14))
+            .background(
+                SteamStyle.card,
+                in: RoundedRectangle(cornerRadius: 14)
+            )
     }
 
     private func loadDetails() async {
-        guard !isLoadingDetails else { return }
+        guard !isLoadingDetails else {
+            return
+        }
 
         isLoadingDetails = true
         detailError = nil
-        defer { isLoadingDetails = false }
+
+        defer {
+            isLoadingDetails = false
+        }
 
         do {
-            details = try await SteamAPI.fetchDetails(appID: game.id)
+            details = try await SteamAPI.fetchDetails(
+                appID: game.id
+            )
         } catch {
             detailError = error.localizedDescription
         }
     }
 
     private func loadReviews() async {
-        guard !isLoadingReviews else { return }
+        guard !isLoadingReviews else {
+            return
+        }
 
         isLoadingReviews = true
         reviewError = nil
-        defer { isLoadingReviews = false }
+
+        defer {
+            isLoadingReviews = false
+        }
 
         do {
-            reviews = try await SteamAPI.fetchReviews(appID: game.id)
+            reviews = try await SteamAPI.fetchReviews(
+                appID: game.id
+            )
         } catch {
             reviewError = error.localizedDescription
         }
@@ -1448,6 +1749,7 @@ private struct SteamGameDetailView: View {
         let url = URL(
             string: "https://steamcommunity.com/app/\(game.id)/reviews/"
         )!
+
         UIApplication.shared.open(url)
     }
 }
