@@ -6,98 +6,262 @@ import Foundation
 
 private enum SteamStyle {
     static let background = Color(red: 0.055, green: 0.090, blue: 0.145)
-    static let surface = Color(red: 0.085, green: 0.135, blue: 0.205)
-    static let surfaceLight = Color(red: 0.115, green: 0.175, blue: 0.250)
-    static let steamBlue = Color(red: 0.30, green: 0.68, blue: 0.91)
-    static let green = Color(red: 0.48, green: 0.83, blue: 0.43)
+    static let card = Color(red: 0.085, green: 0.145, blue: 0.220)
+    static let cardLight = Color(red: 0.115, green: 0.185, blue: 0.270)
+    static let blue = Color(red: 0.20, green: 0.55, blue: 0.82)
+    static let cyan = Color(red: 0.35, green: 0.75, blue: 0.88)
+    static let green = Color(red: 0.30, green: 0.78, blue: 0.48)
     static let text = Color.white
-    static let secondaryText = Color(red: 0.65, green: 0.73, blue: 0.82)
-    static let divider = Color.white.opacity(0.09)
+    static let secondary = Color(red: 0.66, green: 0.73, blue: 0.81)
+    static let red = Color(red: 1.0, green: 0.40, blue: 0.38)
 }
 
 // MARK: - 数据模型
 
 struct SteamGame: Identifiable, Hashable {
     let id: Int
-    var name: String
-    var iconURL: URL? {
-        URL(string: "https://cdn.akamai.steamstatic.com/steam/apps/\(id)/capsule_184x69.jpg")
+    let name: String
+    var originalPrice: String?
+
+    var headerImage: String {
+        "https://cdn.akamai.steamstatic.com/steam/apps/\(id)/header.jpg"
     }
+
+    var capsuleImage: String {
+        "https://cdn.akamai.steamstatic.com/steam/apps/\(id)/capsule_231x87.jpg"
+    }
+
     var storeURL: URL {
         URL(string: "https://store.steampowered.com/app/\(id)/")!
     }
 }
 
 struct SteamGameDetails {
-    let appID: Int
     let name: String
-    let shortDescription: String
-    let headerImage: URL?
-    let screenshots: [URL]
+    let headerImage: String
+    let description: String
     let developers: [String]
+    let publishers: [String]
     let genres: [String]
     let originalPrice: String?
-    let currentPrice: String?
-    let currency: String?
+    let screenshots: [String]
 }
 
 struct SteamReviewSummary {
-    let totalReviews: Int
-    let totalPositive: Int
     let description: String
+    let totalReviews: Int
+    let positiveReviews: Int
+    let negativeReviews: Int
 
-    var positivePercentage: Int {
+    var positivePercent: Int {
         guard totalReviews > 0 else { return 0 }
-        return Int((Double(totalPositive) / Double(totalReviews) * 100).rounded())
+        return Int((Double(positiveReviews) / Double(totalReviews) * 100).rounded())
     }
 }
 
 // MARK: - Steam API
 
-enum SteamAPI {
-    private static func requestJSON(from url: URL) async throws -> Any {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 25
-        request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-            forHTTPHeaderField: "User-Agent"
-        )
-        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
-        request.setValue("https://store.steampowered.com/", forHTTPHeaderField: "Referer")
+enum SteamAPIError: LocalizedError {
+    case invalidURL
+    case badResponse
+    case invalidJSON
+    case noGameIDs
+    case noFreeGames
+    case detailUnavailable
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Steam 接口地址无效"
+        case .badResponse:
+            return "Steam 接口暂时无法访问，请稍后重试"
+        case .invalidJSON:
+            return "Steam 返回的数据格式异常，可能是接口限流或网络异常"
+        case .noGameIDs:
+            return "Steam 搜索接口已返回数据，但没有解析到游戏编号，请稍后重试"
+        case .noFreeGames:
+            return "暂时没有找到符合条件的限时免费游戏，请稍后刷新"
+        case .detailUnavailable:
+            return "暂时无法获取游戏详情，请稍后重试"
+        }
+    }
+}
+
+enum SteamAPI {
+
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 45
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration)
+    }()
+
+    // 统一请求与 JSON 解析
+    private static func requestJSON(_ url: URL) async throws -> Any {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        request.setValue(
+            "application/json, text/javascript, */*; q=0.01",
+            forHTTPHeaderField: "Accept"
+        )
+        request.setValue(
+            "https://store.steampowered.com/",
+            forHTTPHeaderField: "Referer"
+        )
+
+        let (data, response) = try await session.data(for: request)
 
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
-            throw NSError(
-                domain: "SteamAPI",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Steam 接口暂时无法访问，请稍后重试。"]
-            )
+            throw SteamAPIError.badResponse
         }
 
         do {
-            return try JSONSerialization.jsonObject(with: data)
-        } catch {
-            throw NSError(
-                domain: "SteamAPI",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Steam 返回的数据格式异常，可能是接口限流或网络问题。"]
+            return try JSONSerialization.jsonObject(
+                with: data,
+                options: [.fragmentsAllowed]
             )
+        } catch {
+            throw SteamAPIError.invalidJSON
         }
     }
 
-    private static func integer(_ value: Any?) -> Int? {
-        if let number = value as? NSNumber {
-            return number.intValue
+    private static func makeSearchURL() throws -> URL {
+        var components = URLComponents(
+            string: "https://store.steampowered.com/search/results/"
+        )
+
+        components?.queryItems = [
+            URLQueryItem(name: "specials", value: "1"),
+            URLQueryItem(name: "maxprice", value: "free"),
+            URLQueryItem(name: "json", value: "1"),
+            URLQueryItem(name: "count", value: "50"),
+            URLQueryItem(name: "cc", value: "sg"),
+            URLQueryItem(name: "l", value: "schinese")
+        ]
+
+        guard let url = components?.url else {
+            throw SteamAPIError.invalidURL
         }
-        if let string = value as? String {
-            return Int(string)
-        }
-        return nil
+
+        return url
     }
 
-    private static func htmlText(_ html: String) -> String {
+    // 兼容 Steam 搜索结果中的不同字段和 HTML 格式
+    private static func extractCandidates(from json: Any)
+        -> [(id: Int, name: String)] {
+
+        var names: [Int: String] = [:]
+        var orderedIDs: [Int] = []
+
+        func add(_ id: Int, _ name: String?) {
+            guard id > 0 else { return }
+
+            if !orderedIDs.contains(id) {
+                orderedIDs.append(id)
+            }
+
+            if let name = name?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !name.isEmpty {
+                names[id] = name
+            }
+        }
+
+        func extractIDs(from text: String) {
+            let patterns = [
+                #"/app/(\d+)"#,
+                #"/apps/(\d+)/"#,
+                #"steam/apps/(\d+)/"#
+            ]
+
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(
+                    pattern: pattern,
+                    options: [.caseInsensitive]
+                ) else { continue }
+
+                let nsText = text as NSString
+                let matches = regex.matches(
+                    in: text,
+                    range: NSRange(location: 0, length: nsText.length)
+                )
+
+                for match in matches where match.numberOfRanges > 1 {
+                    let value = nsText.substring(with: match.range(at: 1))
+                    if let id = Int(value) {
+                        add(id, nil)
+                    }
+                }
+            }
+        }
+
+        // 先解析 JSON 中可能存在的 items 数组
+        if let dictionary = json as? [String: Any] {
+            if let items = dictionary["items"] as? [[String: Any]] {
+                for item in items {
+                    var appID: Int?
+
+                    if let value = item["appid"] as? Int {
+                        appID = value
+                    } else if let value = item["id"] as? Int {
+                        appID = value
+                    } else if let value = item["appid"] as? String {
+                        appID = Int(value)
+                    }
+
+                    let name = item["name"] as? String
+
+                    if let appID {
+                        add(appID, name)
+                    }
+
+                    // 某些返回格式只有 logo 地址
+                    if let logo = item["logo"] as? String {
+                        extractIDs(from: logo)
+                    }
+                }
+            }
+
+            // 兼容 items 为其他 JSON 结构的情况
+            if let items = dictionary["items"] as? [String: Any] {
+                if let html = items["results_html"] as? String {
+                    extractIDs(from: html)
+                }
+
+                if let results = items["results"] as? [[String: Any]] {
+                    for item in results {
+                        let id = (item["appid"] as? Int)
+                            ?? (item["id"] as? Int)
+
+                        if let id {
+                            add(id, item["name"] as? String)
+                        }
+                    }
+                }
+            }
+
+            if let html = dictionary["results_html"] as? String {
+                extractIDs(from: html)
+            }
+
+            // 部分接口会把 HTML 放在 items 字符串中
+            if let html = dictionary["items"] as? String {
+                extractIDs(from: html)
+            }
+        }
+
+        // 兼容直接返回字符串的情况
+        if let html = json as? String {
+            extractIDs(from: html)
+        }
+
+        return orderedIDs.map { ($0, names[$0] ?? "") }
+    }
+
+    private static func cleanHTML(_ html: String) -> String {
         var result = html
 
         let replacements: [(String, String)] = [
@@ -107,400 +271,303 @@ enum SteamAPI {
             ("&lt;", "<"),
             ("&gt;", ">"),
             ("&nbsp;", " "),
-            ("&#10;", " "),
-            ("<br>", " "),
-            ("<br/>", " "),
-            ("<br />", " ")
+            ("&#x27;", "'")
         ]
 
-        for (from, to) in replacements {
+        for (source, target) in replacements {
             result = result.replacingOccurrences(
-                of: from,
-                with: to,
-                options: .caseInsensitive
+                of: source,
+                with: target
             )
         }
 
-        result = result.replacingOccurrences(
-            of: "<[^>]+>",
-            with: "",
-            options: .regularExpression
-        )
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result
+            .replacingOccurrences(
+                of: "<[^>]+>",
+                with: "",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func formatPrice(
-        cents: Int,
+        cents: Int?,
         currency: String?
-    ) -> String {
-        let currencyCode = currency ?? "SGD"
+    ) -> String? {
+        guard let cents, cents > 0 else { return nil }
 
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = currencyCode
-        formatter.maximumFractionDigits = 2
-        formatter.minimumFractionDigits = 2
+        let amount = Double(cents) / 100.0
 
-        let amount = NSNumber(value: Double(cents) / 100.0)
-        return formatter.string(from: amount)
-            ?? String(format: "%.2f", Double(cents) / 100.0)
+        switch currency?.uppercased() {
+        case "CNY":
+            return String(format: "¥%.2f", amount)
+        case "SGD":
+            return String(format: "S$%.2f", amount)
+        case "USD":
+            return String(format: "$%.2f", amount)
+        case "EUR":
+            return String(format: "€%.2f", amount)
+        case "GBP":
+            return String(format: "£%.2f", amount)
+        default:
+            return String(format: "%.2f", amount)
+        }
     }
 
-    // 搜索 Steam 限时免费促销列表
-    static func fetchFreeGames() async throws -> [SteamGame] {
-        var components = URLComponents(
-            string: "https://store.steampowered.com/search/results/"
-        )!
+    private static func appDetailsJSON(appID: Int) async throws
+        -> [String: Any] {
 
-        components.queryItems = [
-            URLQueryItem(name: "specials", value: "1"),
-            URLQueryItem(name: "maxprice", value: "free"),
-            URLQueryItem(name: "json", value: "1"),
-            URLQueryItem(name: "count", value: "50"),
-            URLQueryItem(name: "cc", value: "sg"),
-            URLQueryItem(name: "l", value: "schinese")
-        ]
-
-        guard let url = components.url else {
-            throw URLError(.badURL)
-        }
-
-        let json = try await requestJSON(from: url)
-
-        guard let root = json as? [String: Any],
-              let html = root["results_html"] as? String else {
-            throw NSError(
-                domain: "SteamAPI",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "无法读取 Steam 游戏列表。"]
-            )
-        }
-
-        // 从搜索结果的游戏链接中提取 app ID 和名称。
-        let pattern = #"<a\b[^>]*href="https?://store\.steampowered\.com/app/(\d+)[^"]*"[^>]*>(.*?)</a>"#
-        let regex = try NSRegularExpression(
-            pattern: pattern,
-            options: [.caseInsensitive, .dotMatchesLineSeparators]
-        )
-
-        let nsHTML = html as NSString
-        let matches = regex.matches(
-            in: html,
-            range: NSRange(location: 0, length: nsHTML.length)
-        )
-
-        var games: [SteamGame] = []
-        var seen = Set<Int>()
-
-        for match in matches {
-            guard match.numberOfRanges >= 3,
-                  let idRange = Range(match.range(at: 1), in: html),
-                  let contentRange = Range(match.range(at: 2), in: html),
-                  let appID = Int(html[idRange]),
-                  !seen.contains(appID) else {
-                continue
-            }
-
-            let content = String(html[contentRange])
-
-            let titlePattern = #"<span[^>]*class="[^"]*\btitle\b[^"]*"[^>]*>(.*?)</span>"#
-            let titleRegex = try? NSRegularExpression(
-                pattern: titlePattern,
-                options: [.caseInsensitive, .dotMatchesLineSeparators]
-            )
-
-            var name = "Steam 游戏 \(appID)"
-
-            if let titleRegex,
-               let titleMatch = titleRegex.firstMatch(
-                    in: content,
-                    range: NSRange(location: 0, length: (content as NSString).length)
-               ),
-               titleMatch.numberOfRanges >= 2,
-               let titleRange = Range(titleMatch.range(at: 1), in: content) {
-                let title = htmlText(String(content[titleRange]))
-                if !title.isEmpty {
-                    name = title
-                }
-            }
-
-            seen.insert(appID)
-            games.append(SteamGame(id: appID, name: name))
-        }
-
-        // 兼容 Steam 搜索结果的 HTML 结构发生变化的情况。
-        if games.isEmpty {
-            let fallbackPattern = #"/app/(\d+)/"#
-            let fallbackRegex = try NSRegularExpression(pattern: fallbackPattern)
-            let fallbackMatches = fallbackRegex.matches(
-                in: html,
-                range: NSRange(location: 0, length: nsHTML.length)
-            )
-
-            for match in fallbackMatches {
-                guard let range = Range(match.range(at: 1), in: html),
-                      let appID = Int(html[range]),
-                      !seen.contains(appID) else {
-                    continue
-                }
-
-                seen.insert(appID)
-                games.append(SteamGame(id: appID, name: "Steam 游戏 \(appID)"))
-            }
-        }
-
-        // 进一步检查是否确实存在限时免费促销包。
-        var verified: [SteamGame] = []
-
-        for game in games {
-            do {
-                if try await isPermanentFreePromotion(appID: game.id) {
-                    verified.append(game)
-                }
-            } catch {
-                // 单个游戏验证失败时不影响其他游戏。
-                continue
-            }
-        }
-
-        return verified
-    }
-
-    // 检查 Steam 是否提供限时免费促销包。
-    private static func isPermanentFreePromotion(appID: Int) async throws -> Bool {
         var components = URLComponents(
             string: "https://store.steampowered.com/api/appdetails/"
-        )!
+        )
 
-        components.queryItems = [
+        components?.queryItems = [
             URLQueryItem(name: "appids", value: String(appID)),
             URLQueryItem(name: "cc", value: "sg"),
             URLQueryItem(name: "l", value: "schinese")
         ]
 
-        guard let url = components.url else {
-            throw URLError(.badURL)
+        guard let url = components?.url else {
+            throw SteamAPIError.invalidURL
         }
 
-        let json = try await requestJSON(from: url)
+        let json = try await requestJSON(url)
 
         guard let root = json as? [String: Any],
-              let app = root[String(appID)] as? [String: Any],
-              let success = app["success"] as? Bool,
-              success,
-              let data = app["data"] as? [String: Any],
-              let groups = data["package_groups"] as? [[String: Any]] else {
-            return false
+              let result = root[String(appID)] as? [String: Any],
+              (result["success"] as? Bool) == true,
+              let data = result["data"] as? [String: Any] else {
+            throw SteamAPIError.detailUnavailable
+        }
+
+        return data
+    }
+
+    private static func promotionInfo(
+        from data: [String: Any]
+    ) -> (isFree: Bool, originalPrice: String?) {
+
+        guard let groups = data["package_groups"] as? [[String: Any]]
+        else {
+            return (false, nil)
         }
 
         for group in groups {
-            guard let subs = group["subs"] as? [[String: Any]] else {
-                continue
-            }
+            guard let subs = group["subs"] as? [[String: Any]]
+            else { continue }
 
             for sub in subs {
                 let optionText = (
                     sub["option_text"] as? String ?? ""
                 ).lowercased()
 
-                let discountedPrice = integer(
-                    sub["price_in_cents_with_discount"]
-                )
+                let discountPrice =
+                    (sub["price_in_cents_with_discount"] as? Int)
+                    ?? Int(
+                        sub["price_in_cents_with_discount"] as? String ?? ""
+                    )
 
-                if optionText.contains("limited free promotional package"),
-                   discountedPrice == 0 {
-                    return true
+                let originalCents =
+                    (sub["price_in_cents_without_discount"] as? Int)
+                    ?? Int(
+                        sub["price_in_cents_without_discount"] as? String ?? ""
+                    )
+
+                let isLimitedPromotion =
+                    optionText.contains("limited free promotional package")
+                    || optionText.contains("limited-time free")
+                    || optionText.contains("限时免费")
+
+                if isLimitedPromotion, discountPrice == 0 {
+                    return (
+                        true,
+                        formatPrice(
+                            cents: originalCents,
+                            currency: "SGD"
+                        )
+                    )
                 }
             }
         }
 
-        return false
+        return (false, nil)
     }
 
-    // 游戏详情和原价。
-    static func fetchDetails(appID: Int) async throws -> SteamGameDetails {
-        var components = URLComponents(
-            string: "https://store.steampowered.com/api/appdetails/"
-        )!
+    // MARK: 获取限时免费游戏列表
 
-        components.queryItems = [
-            URLQueryItem(name: "appids", value: String(appID)),
-            URLQueryItem(name: "cc", value: "sg"),
-            URLQueryItem(name: "l", value: "schinese")
-        ]
+    static func fetchFreeGames() async throws -> [SteamGame] {
+        let searchURL = try makeSearchURL()
+        let json = try await requestJSON(searchURL)
+        let candidates = extractCandidates(from: json)
 
-        guard let url = components.url else {
-            throw URLError(.badURL)
+        guard !candidates.isEmpty else {
+            throw SteamAPIError.noGameIDs
         }
 
-        let json = try await requestJSON(from: url)
+        var games: [SteamGame] = []
+        var checked = 0
 
-        guard let root = json as? [String: Any],
-              let app = root[String(appID)] as? [String: Any],
-              let success = app["success"] as? Bool,
-              success,
-              let data = app["data"] as? [String: Any] else {
-            throw NSError(
-                domain: "SteamAPI",
-                code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "无法读取游戏详情，请稍后重试。"]
-            )
-        }
+        // 保留原先的核验方式：
+        // 搜索接口负责发现游戏，appdetails 负责核实限时免费资格。
+        for candidate in candidates {
+            if Task.isCancelled { break }
 
-        let name = data["name"] as? String ?? "Steam 游戏 \(appID)"
-        let description = htmlText(
-            data["short_description"] as? String ?? "暂无游戏简介。"
-        )
+            do {
+                let data = try await appDetailsJSON(appID: candidate.id)
+                checked += 1
 
-        let headerURL = URL(
-            string: data["header_image"] as? String ?? ""
-        )
+                let promotion = promotionInfo(from: data)
 
-        var screenshots: [URL] = []
-        if let items = data["screenshots"] as? [[String: Any]] {
-            screenshots = items.compactMap {
-                guard let path = $0["path_full"] as? String else {
-                    return nil
+                guard promotion.isFree else { continue }
+
+                let name = data["name"] as? String
+                    ?? candidate.name
+
+                guard !name.isEmpty else { continue }
+
+                let game = SteamGame(
+                    id: candidate.id,
+                    name: name,
+                    originalPrice: promotion.originalPrice
+                )
+
+                if !games.contains(where: { $0.id == game.id }) {
+                    games.append(game)
                 }
-                return URL(string: path)
+            } catch {
+                // 单个游戏接口失败，不影响其他游戏继续核验
+                continue
             }
         }
+
+        if games.isEmpty && checked == 0 {
+            throw SteamAPIError.badResponse
+        }
+
+        return games.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name)
+                == .orderedAscending
+        }
+    }
+
+    // MARK: 获取详情
+
+    static func fetchDetails(appID: Int) async throws -> SteamGameDetails {
+        let data = try await appDetailsJSON(appID: appID)
+
+        let screenshots = (data["screenshots"] as? [[String: Any]] ?? [])
+            .compactMap { $0["path_full"] as? String }
 
         let developers = data["developers"] as? [String] ?? []
+        let publishers = data["publishers"] as? [String] ?? []
 
-        var genres: [String] = []
-        if let items = data["genres"] as? [[String: Any]] {
-            genres = items.compactMap { $0["description"] as? String }
-        }
-
-        let priceOverview = data["price_overview"] as? [String: Any]
-        let currency = priceOverview?["currency"] as? String ?? "SGD"
+        let genres = (data["genres"] as? [[String: Any]] ?? [])
+            .compactMap { $0["description"] as? String }
 
         var originalPrice: String?
-        var currentPrice: String?
 
-        if let overview = priceOverview {
-            if let initial = overview["initial_formatted"] as? String,
-               !initial.isEmpty {
-                originalPrice = initial
-            } else if let initial = integer(overview["initial"]), initial > 0 {
-                originalPrice = formatPrice(cents: initial, currency: currency)
-            }
+        if let priceOverview = data["price_overview"] as? [String: Any] {
+            originalPrice =
+                priceOverview["initial_formatted"] as? String
 
-            if let final = overview["final_formatted"] as? String,
-               !final.isEmpty {
-                currentPrice = final
-            } else if let final = integer(overview["final"]) {
-                currentPrice = formatPrice(cents: final, currency: currency)
+            if originalPrice?.isEmpty == true {
+                originalPrice = nil
             }
         }
 
-        // 限时免费包的原价可能在 package_groups 中，
-        // 而不是 price_overview 中。
-        if originalPrice == nil,
-           let groups = data["package_groups"] as? [[String: Any]] {
-            var originalCents: Int?
-
-            for group in groups {
-                guard let subs = group["subs"] as? [[String: Any]] else {
-                    continue
-                }
-
-                for sub in subs {
-                    let optionText = (
-                        sub["option_text"] as? String ?? ""
-                    ).lowercased()
-
-                    let discounted = integer(
-                        sub["price_in_cents_with_discount"]
-                    )
-
-                    let undiscounted = integer(
-                        sub["price_in_cents_without_discount"]
-                    )
-
-                    if optionText.contains("limited free promotional package"),
-                       discounted == 0,
-                       let undiscounted,
-                       undiscounted > 0 {
-                        originalCents = max(
-                            originalCents ?? 0,
-                            undiscounted
-                        )
-                    }
-                }
-            }
-
-            if let originalCents {
-                originalPrice = formatPrice(
-                    cents: originalCents,
-                    currency: currency
-                )
-            }
+        if originalPrice == nil {
+            originalPrice = promotionInfo(from: data).originalPrice
         }
 
         return SteamGameDetails(
-            appID: appID,
-            name: name,
-            shortDescription: description,
-            headerImage: headerURL,
-            screenshots: screenshots,
+            name: data["name"] as? String ?? "未知游戏",
+            headerImage: data["header_image"] as? String
+                ?? "https://cdn.akamai.steamstatic.com/steam/apps/\(appID)/header.jpg",
+            description: cleanHTML(
+                data["short_description"] as? String ?? "暂无游戏介绍"
+            ),
             developers: developers,
+            publishers: publishers,
             genres: genres,
             originalPrice: originalPrice,
-            currentPrice: currentPrice,
-            currency: currency
+            screenshots: screenshots
         )
     }
 
-    // Steam 用户评价。
-    static func fetchReviews(appID: Int) async throws -> SteamReviewSummary {
+    // MARK: 获取 Steam 评价
+
+    static func fetchReviews(appID: Int) async throws
+        -> SteamReviewSummary {
+
         var components = URLComponents(
             string: "https://store.steampowered.com/appreviews/\(appID)"
-        )!
+        )
 
-        components.queryItems = [
+        components?.queryItems = [
             URLQueryItem(name: "json", value: "1"),
             URLQueryItem(name: "language", value: "all"),
             URLQueryItem(name: "purchase_type", value: "all"),
             URLQueryItem(name: "num_per_page", value: "10")
         ]
 
-        guard let url = components.url else {
-            throw URLError(.badURL)
+        guard let url = components?.url else {
+            throw SteamAPIError.invalidURL
         }
 
-        let json = try await requestJSON(from: url)
+        let json = try await requestJSON(url)
 
         guard let root = json as? [String: Any],
               let summary = root["query_summary"] as? [String: Any] else {
-            throw NSError(
-                domain: "SteamAPI",
-                code: 5,
-                userInfo: [NSLocalizedDescriptionKey: "暂时无法获取 Steam 评价。"]
-            )
+            throw SteamAPIError.invalidJSON
         }
 
-        let totalReviews = integer(summary["total_reviews"]) ?? 0
-        let totalPositive = integer(summary["total_positive"]) ?? 0
-        let description = summary["review_score_desc"] as? String ?? "暂无评价"
-
         return SteamReviewSummary(
-            totalReviews: totalReviews,
-            totalPositive: totalPositive,
-            description: description
+            description: summary["review_score_desc"] as? String
+                ?? "暂无评价",
+            totalReviews: summary["total_reviews"] as? Int ?? 0,
+            positiveReviews: summary["total_positive"] as? Int ?? 0,
+            negativeReviews: summary["total_negative"] as? Int ?? 0
         )
     }
 }
 
-// MARK: - 首页
+// MARK: - 列表状态管理
+
+@MainActor
+final class SteamStore: ObservableObject {
+    @Published var games: [SteamGame] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    @Published var lastUpdated: Date?
+
+    func refresh() async {
+        guard !isLoading else { return }
+
+        isLoading = true
+        errorMessage = nil
+
+        defer {
+            isLoading = false
+        }
+
+        do {
+            let result = try await SteamAPI.fetchFreeGames()
+            games = result
+            lastUpdated = Date()
+
+            if result.isEmpty {
+                errorMessage = SteamAPIError.noFreeGames.localizedDescription
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - 主页
 
 struct ContentView: View {
-    @State private var games: [SteamGame] = []
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-    @State private var lastUpdated: Date?
+    @StateObject private var store = SteamStore()
 
     private let columns = [
         GridItem(.flexible(), spacing: 12),
@@ -510,324 +577,349 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                SteamStyle.background.ignoresSafeArea()
+                SteamStyle.background
+                    .ignoresSafeArea()
 
                 ScrollView {
                     VStack(spacing: 22) {
                         header
                         summaryCard
-                        gameSection
+
+                        if store.isLoading && store.games.isEmpty {
+                            loadingView
+                        } else if let error = store.errorMessage,
+                                  store.games.isEmpty {
+                            errorView(error)
+                        } else if store.games.isEmpty {
+                            emptyView
+                        } else {
+                            gameGrid
+                        }
+
+                        footer
                     }
                     .padding(.horizontal, 16)
-                    .padding(.top, 16)
-                    .padding(.bottom, 32)
+                    .padding(.top, 18)
+                    .padding(.bottom, 30)
                 }
                 .refreshable {
-                    await refreshGames()
+                    await store.refresh()
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
             .task {
-                if games.isEmpty {
-                    await refreshGames()
+                if store.games.isEmpty && !store.isLoading {
+                    await store.refresh()
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var header: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 10) {
+                Image(systemName: "gamecontroller.fill")
+                    .font(.system(size: 29, weight: .bold))
+                    .foregroundStyle(SteamStyle.cyan)
+
+                Text("STEAM")
+                    .font(.system(size: 29, weight: .black, design: .rounded))
+                    .tracking(2)
+                    .foregroundStyle(.white)
+
+                Text("限免助手")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(SteamStyle.cyan)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Text("发现正在限时免费的 Steam 游戏")
+                .font(.system(size: 13))
+                .foregroundStyle(SteamStyle.secondary)
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(SteamStyle.green)
+                    .frame(width: 7, height: 7)
+
+                Text("STEAM STORE")
+                    .font(.system(size: 10, weight: .bold))
+                    .tracking(1.5)
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+    }
+
+    private var summaryCard: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(SteamStyle.blue.opacity(0.20))
+                    .frame(width: 54, height: 54)
+
+                Image(systemName: "gift.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(SteamStyle.cyan)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("今日限免发现")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text("符合条件的限时免费游戏")
+                    .font(.system(size: 12))
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+
+            Spacer(minLength: 4)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(store.games.count)")
+                    .font(.system(size: 30, weight: .heavy, design: .rounded))
+                    .foregroundStyle(SteamStyle.cyan)
+                    .contentTransition(.numericText())
+
+                Text("款游戏")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+        }
+        .padding(16)
+        .background(
+            LinearGradient(
+                colors: [SteamStyle.cardLight, SteamStyle.card],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(SteamStyle.cyan.opacity(0.15), lineWidth: 1)
+        }
+    }
+
+    private var gameGrid: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("限免游戏")
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                Button {
+                    Task {
+                        await store.refresh()
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("刷新")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(SteamStyle.cyan)
+                }
+                .disabled(store.isLoading)
+            }
+
+            LazyVGrid(columns: columns, spacing: 14) {
+                ForEach(store.games) { game in
+                    NavigationLink(value: game) {
+                        GameCard(game: game)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .navigationDestination(for: SteamGame.self) { game in
                 SteamGameDetailView(game: game)
             }
         }
-        .tint(SteamStyle.steamBlue)
-        .preferredColorScheme(.dark)
     }
 
-    private var header: some View {
-        VStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(SteamStyle.steamBlue.opacity(0.15))
-                    .frame(width: 72, height: 72)
+    private var loadingView: some View {
+        VStack(spacing: 15) {
+            ProgressView()
+                .tint(SteamStyle.cyan)
+                .scaleEffect(1.25)
 
-                Image(systemName: "gamecontroller.fill")
-                    .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(SteamStyle.steamBlue)
-            }
+            Text("正在连接 Steam，核实限免资格…")
+                .font(.system(size: 13))
+                .foregroundStyle(SteamStyle.secondary)
 
-            Text("STEAM")
-                .font(.system(size: 13, weight: .black, design: .rounded))
-                .tracking(5)
-                .foregroundStyle(SteamStyle.steamBlue)
-
-            Text("永久限免助手")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-
-            Text("发现正在限时免费领取的游戏")
-                .font(.subheadline)
-                .foregroundStyle(SteamStyle.secondaryText)
-                .multilineTextAlignment(.center)
+            Text("首次加载可能需要一点时间")
+                .font(.system(size: 11))
+                .foregroundStyle(SteamStyle.secondary.opacity(0.75))
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
+        .padding(.vertical, 70)
     }
 
-    private var summaryCard: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 13)
-                    .fill(SteamStyle.steamBlue.opacity(0.15))
-                    .frame(width: 48, height: 48)
+    private func errorView(_ error: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 36))
+                .foregroundStyle(SteamStyle.red)
 
-                Image(systemName: "gift.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(SteamStyle.steamBlue)
-            }
+            Text("暂时无法读取 Steam 游戏列表")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("当前限免游戏")
-                    .font(.subheadline)
-                    .foregroundStyle(SteamStyle.secondaryText)
-
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("\(games.count)")
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-
-                    Text("款")
-                        .font(.subheadline)
-                        .foregroundStyle(SteamStyle.secondaryText)
-                }
-            }
-
-            Spacer()
+            Text(error)
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
 
             Button {
-                Task { await refreshGames() }
+                Task {
+                    await store.refresh()
+                }
             } label: {
-                if isLoading {
-                    ProgressView()
-                        .tint(.white)
-                        .frame(width: 42, height: 42)
-                } else {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                }
+                Label("重新获取", systemImage: "arrow.clockwise")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(SteamStyle.blue)
+                    .clipShape(Capsule())
             }
-            .buttonStyle(.plain)
-            .background(SteamStyle.surfaceLight, in: RoundedRectangle(cornerRadius: 12))
-            .disabled(isLoading)
-            .accessibilityLabel("刷新游戏列表")
-        }
-        .padding(16)
-        .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 18))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(SteamStyle.divider, lineWidth: 1)
-        }
-    }
-
-    private var gameSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("免费领取")
-                        .font(.title3.bold())
-                        .foregroundStyle(.white)
-
-                    Text("点开游戏查看详情")
-                        .font(.caption)
-                        .foregroundStyle(SteamStyle.secondaryText)
-                }
-
-                Spacer()
-
-                if isLoading {
-                    ProgressView()
-                        .tint(SteamStyle.steamBlue)
-                }
-            }
-
-            if let errorMessage, games.isEmpty {
-                emptyState(
-                    icon: "wifi.exclamationmark",
-                    title: "暂时无法加载",
-                    message: errorMessage,
-                    buttonTitle: "重新加载"
-                ) {
-                    Task { await refreshGames() }
-                }
-            } else if games.isEmpty && !isLoading {
-                emptyState(
-                    icon: "gamecontroller",
-                    title: "暂时没有找到限免游戏",
-                    message: "可以下拉刷新，或稍后再次检查。",
-                    buttonTitle: "重新检查"
-                ) {
-                    Task { await refreshGames() }
-                }
-            } else {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(games) { game in
-                        NavigationLink(value: game) {
-                            GameCard(game: game)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if let lastUpdated {
-                Text("最后检查：\(lastUpdated.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption2)
-                    .foregroundStyle(SteamStyle.secondaryText.opacity(0.8))
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 4)
-            }
-
-            Text("价格与促销信息以 Steam 商店页面为准。")
-                .font(.caption2)
-                .foregroundStyle(SteamStyle.secondaryText.opacity(0.75))
-                .frame(maxWidth: .infinity)
-        }
-    }
-
-    private func emptyState(
-        icon: String,
-        title: String,
-        message: String,
-        buttonTitle: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 34))
-                .foregroundStyle(SteamStyle.steamBlue)
-
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(.white)
-
-            Text(message)
-                .font(.subheadline)
-                .foregroundStyle(SteamStyle.secondaryText)
-                .multilineTextAlignment(.center)
-
-            Button(buttonTitle, action: action)
-                .font(.subheadline.bold())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 11)
-                .background(SteamStyle.steamBlue, in: Capsule())
+            .disabled(store.isLoading)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 36)
-        .padding(.horizontal, 20)
-        .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 18))
+        .padding(24)
+        .background(SteamStyle.card)
+        .clipShape(RoundedRectangle(cornerRadius: 18))
     }
 
-    @MainActor
-    private func refreshGames() async {
-        guard !isLoading else { return }
+    private var emptyView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "gamecontroller")
+                .font(.system(size: 38))
+                .foregroundStyle(SteamStyle.secondary)
 
-        isLoading = true
-        errorMessage = nil
+            Text("暂时没有找到限免游戏")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
 
-        do {
-            games = try await SteamAPI.fetchFreeGames()
-            lastUpdated = Date()
-        } catch {
-            errorMessage = error.localizedDescription
+            Text("可以下拉页面刷新，重新检查 Steam 商店")
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+
+            Button("重新检查") {
+                Task {
+                    await store.refresh()
+                }
+            }
+            .tint(SteamStyle.cyan)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 45)
+    }
 
-        isLoading = false
+    private var footer: some View {
+        VStack(spacing: 6) {
+            if let updated = store.lastUpdated {
+                Text("最近检查：\(updated.formatted(date: .omitted, time: .shortened))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(SteamStyle.secondary.opacity(0.8))
+            }
+
+            Text("数据来自 Steam 商店 · 领取前请以商店页面为准")
+                .font(.system(size: 10))
+                .foregroundStyle(SteamStyle.secondary.opacity(0.65))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
     }
 }
 
-// MARK: - 首页游戏卡片
+// MARK: - 游戏卡片
 
 struct GameCard: View {
     let game: SteamGame
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .topTrailing) {
-                AsyncImage(url: game.iconURL) { phase in
-                    switch phase {
-                    case .success(let image):
+            ZStack(alignment: .topLeading) {
+                AsyncImage(url: URL(string: game.capsuleImage)) { phase in
+                    if let image = phase.image {
                         image
                             .resizable()
                             .scaledToFill()
-                    case .failure:
-                        placeholderIcon
-                    case .empty:
-                        placeholderIcon
-                            .overlay {
-                                ProgressView()
-                                    .tint(SteamStyle.steamBlue)
-                            }
-                    @unknown default:
-                        placeholderIcon
+                    } else {
+                        ZStack {
+                            SteamStyle.cardLight
+
+                            Image(systemName: "gamecontroller.fill")
+                                .font(.system(size: 30))
+                                .foregroundStyle(SteamStyle.secondary)
+                        }
                     }
                 }
-                .frame(height: 112)
+                .frame(height: 105)
                 .frame(maxWidth: .infinity)
                 .clipped()
 
                 Text("限时免费")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color(red: 0.06, green: 0.16, blue: 0.08))
-                    .padding(.horizontal, 8)
+                    .foregroundStyle(Color(red: 0.04, green: 0.16, blue: 0.09))
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(SteamStyle.green, in: Capsule())
-                    .padding(8)
+                    .background(SteamStyle.green)
+                    .clipShape(
+                        UnevenRoundedRectangle(
+                            topLeadingRadius: 10,
+                            bottomTrailingRadius: 9
+                        )
+                    )
             }
 
             VStack(alignment: .leading, spacing: 10) {
                 Text(game.name)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 36, alignment: .topLeading)
+
+                Divider()
+                    .overlay(.white.opacity(0.08))
 
                 HStack(alignment: .center, spacing: 5) {
-                    Text("¥0.00")
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
-                        .foregroundStyle(SteamStyle.green)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("当前价格")
+                            .font(.system(size: 9))
+                            .foregroundStyle(SteamStyle.secondary)
 
-                    Spacer(minLength: 2)
+                        Text("¥0.00")
+                            .font(.system(size: 18, weight: .heavy, design: .rounded))
+                            .foregroundStyle(SteamStyle.green)
+                    }
+
+                    Spacer(minLength: 0)
 
                     Image(systemName: "arrow.up.right")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(SteamStyle.steamBlue)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(SteamStyle.cyan)
+                        .frame(width: 28, height: 28)
+                        .background(SteamStyle.blue.opacity(0.20))
+                        .clipShape(Circle())
                 }
-
-                Text("查看详情  ›")
-                    .font(.caption)
-                    .foregroundStyle(SteamStyle.steamBlue)
             }
             .padding(11)
         }
-        .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(SteamStyle.card)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay {
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(SteamStyle.divider, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.white.opacity(0.06), lineWidth: 1)
         }
-        .contentShape(RoundedRectangle(cornerRadius: 14))
-    }
-
-    private var placeholderIcon: some View {
-        ZStack {
-            SteamStyle.surfaceLight
-            Image(systemName: "gamecontroller.fill")
-                .font(.system(size: 28))
-                .foregroundStyle(SteamStyle.secondaryText)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 112)
     }
 }
 
@@ -837,429 +929,374 @@ struct SteamGameDetailView: View {
     let game: SteamGame
 
     @State private var details: SteamGameDetails?
-    @State private var review: SteamReviewSummary?
+    @State private var reviews: SteamReviewSummary?
+
     @State private var detailsError: String?
-    @State private var reviewError: String?
+    @State private var reviewsError: String?
+
     @State private var loadingDetails = true
     @State private var loadingReviews = true
 
-    @Environment(\.openURL) private var openURL
-
     var body: some View {
         ZStack {
-            SteamStyle.background.ignoresSafeArea()
+            SteamStyle.background
+                .ignoresSafeArea()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     heroImage
+
                     titleSection
+
                     priceSection
+
                     reviewSection
+
                     descriptionSection
-                    infoSection
+
+                    informationSection
+
                     screenshotsSection
+
                     claimButton
                 }
-                .padding(.bottom, 32)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 30)
             }
-            .ignoresSafeArea(edges: .top)
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .task(id: game.id) {
+        .navigationTitle("游戏详情")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(SteamStyle.background, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .task {
             await loadDetails()
             await loadReviews()
         }
-        .preferredColorScheme(.dark)
     }
 
     private var heroImage: some View {
-        ZStack(alignment: .bottomLeading) {
-            if let url = details?.headerImage {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        heroPlaceholder
-                    }
-                }
+        AsyncImage(
+            url: URL(string: details?.headerImage ?? game.headerImage)
+        ) { phase in
+            if let image = phase.image {
+                image
+                    .resizable()
+                    .scaledToFit()
             } else {
-                heroPlaceholder
+                ZStack {
+                    SteamStyle.card
+                    ProgressView()
+                        .tint(SteamStyle.cyan)
+                }
+                .frame(height: 180)
             }
-
-            LinearGradient(
-                colors: [.clear, SteamStyle.background.opacity(0.95)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text("STEAM STORE")
-                    .font(.system(size: 11, weight: .black))
-                    .tracking(3)
-                    .foregroundStyle(SteamStyle.steamBlue)
-
-                Text(details?.name ?? game.name)
-                    .font(.system(size: 27, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(3)
-            }
-            .padding(18)
-        }
-        .frame(height: 270)
-        .frame(maxWidth: .infinity)
-        .clipped()
-    }
-
-    private var heroPlaceholder: some View {
-        ZStack {
-            SteamStyle.surface
-            Image(systemName: "gamecontroller.fill")
-                .font(.system(size: 54))
-                .foregroundStyle(SteamStyle.steamBlue.opacity(0.65))
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 270)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
     private var titleSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "gift.fill")
+            Text(details?.name ?? game.name)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 7) {
+                Image(systemName: "checkmark.seal.fill")
                     .foregroundStyle(SteamStyle.green)
 
-                Text("限时免费领取")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(SteamStyle.green)
-
-                Spacer()
-
-                Text("APP ID \(game.id)")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(SteamStyle.secondaryText)
+                Text("Steam 限时免费活动")
+                    .foregroundStyle(SteamStyle.secondary)
             }
-
-            if loadingDetails {
-                HStack(spacing: 8) {
-                    ProgressView().tint(SteamStyle.steamBlue)
-                    Text("正在加载游戏信息…")
-                        .font(.caption)
-                        .foregroundStyle(SteamStyle.secondaryText)
-                }
-            } else if let detailsError {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(detailsError)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-
-                    Button("重新加载详情") {
-                        Task { await loadDetails() }
-                    }
-                    .font(.subheadline.bold())
-                    .foregroundStyle(SteamStyle.steamBlue)
-                }
-            } else if let details {
-                Text(details.shortDescription)
-                    .font(.subheadline)
-                    .foregroundStyle(SteamStyle.secondaryText)
-                    .lineSpacing(4)
-            }
+            .font(.system(size: 12))
         }
-        .padding(.horizontal, 16)
     }
 
     private var priceSection: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
-                Label("当前促销价格", systemImage: "tag.fill")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("价格信息")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
 
-                Spacer()
-
-                Text("限时优惠")
-                    .font(.caption.bold())
-                    .foregroundStyle(SteamStyle.green)
-            }
-
-            HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("当前价格")
-                        .font(.caption)
-                        .foregroundStyle(SteamStyle.secondaryText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(SteamStyle.secondary)
 
                     Text("¥0.00")
-                        .font(.system(size: 32, weight: .heavy, design: .rounded))
+                        .font(.system(size: 27, weight: .heavy, design: .rounded))
                         .foregroundStyle(SteamStyle.green)
                 }
 
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text("Steam 原价")
-                        .font(.caption)
-                        .foregroundStyle(SteamStyle.secondaryText)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text("原价")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SteamStyle.secondary)
 
-                    if let originalPrice = details?.originalPrice {
-                        Text(originalPrice)
-                            .font(.system(size: 17, weight: .semibold))
-                            .strikethrough(color: .white.opacity(0.8))
-                            .foregroundStyle(SteamStyle.secondaryText)
+                    if let price = details?.originalPrice ?? game.originalPrice,
+                       !price.isEmpty,
+                       price != "¥0.00",
+                       price != "S$0.00" {
+                        Text(price)
+                            .font(.system(size: 16, weight: .semibold))
+                            .strikethrough(color: SteamStyle.red)
+                            .foregroundStyle(SteamStyle.secondary)
                     } else if loadingDetails {
                         ProgressView()
-                            .tint(SteamStyle.secondaryText)
+                            .tint(SteamStyle.cyan)
                     } else {
-                        Text("暂不可用")
-                            .font(.subheadline)
-                            .foregroundStyle(SteamStyle.secondaryText)
+                        Text("以商店页面为准")
+                            .font(.system(size: 11))
+                            .foregroundStyle(SteamStyle.secondary)
                     }
                 }
             }
+            .padding(15)
+            .background(SteamStyle.card)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
 
-            HStack(spacing: 6) {
-                Image(systemName: "info.circle.fill")
-                Text("价格以 Steam 商店实际显示为准，免费活动可能随时结束。")
-            }
-            .font(.caption2)
-            .foregroundStyle(SteamStyle.secondaryText)
+            Text("限免活动可能随时结束，领取前请确认商店页面仍显示免费。")
+                .font(.system(size: 11))
+                .foregroundStyle(SteamStyle.secondary)
         }
-        .padding(16)
-        .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 18))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(SteamStyle.green.opacity(0.25), lineWidth: 1)
-        }
-        .padding(.horizontal, 16)
     }
 
     private var reviewSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("Steam 玩家评价", systemImage: "text.bubble.fill")
-                    .font(.headline)
-                    .foregroundStyle(.white)
+            Text("Steam 玩家评价")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
 
-                Spacer()
-
-                if loadingReviews {
-                    ProgressView().tint(SteamStyle.steamBlue)
-                }
-            }
-
-            if let review {
+            if let reviews {
                 HStack(spacing: 15) {
-                    VStack(spacing: 4) {
-                        Text("\(review.positivePercentage)%")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
-                            .foregroundStyle(review.positivePercentage >= 70
-                                             ? SteamStyle.green : .orange)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(reviews.description)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(
+                                reviews.positivePercent >= 70
+                                    ? SteamStyle.green : SteamStyle.cyan
+                            )
+
+                        Text("\(reviews.totalReviews) 条玩家评价")
+                            .font(.system(size: 11))
+                            .foregroundStyle(SteamStyle.secondary)
+                    }
+
+                    Spacer()
+
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Text("\(reviews.positivePercent)%")
+                            .font(.system(size: 25, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.white)
 
                         Text("好评率")
-                            .font(.caption)
-                            .foregroundStyle(SteamStyle.secondaryText)
+                            .font(.system(size: 11))
+                            .foregroundStyle(SteamStyle.secondary)
                     }
-                    .frame(width: 82)
-
-                    Rectangle()
-                        .fill(SteamStyle.divider)
-                        .frame(width: 1, height: 54)
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(review.description)
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(SteamStyle.green)
-
-                        Text("\(review.totalReviews.formatted()) 条用户评价")
-                            .font(.caption)
-                            .foregroundStyle(SteamStyle.secondaryText)
-                    }
-
-                    Spacer(minLength: 0)
                 }
-                .padding(14)
+
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(SteamStyle.red.opacity(0.75))
+
+                        Capsule()
+                            .fill(SteamStyle.green)
+                            .frame(
+                                width: geometry.size.width
+                                    * CGFloat(reviews.positivePercent) / 100
+                            )
+                    }
+                }
+                .frame(height: 7)
+
+                HStack {
+                    Text("好评 \(reviews.positiveReviews)")
+                    Spacer()
+                    Text("差评 \(reviews.negativeReviews)")
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(SteamStyle.secondary)
+
+            } else if loadingReviews {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(SteamStyle.cyan)
+
+                    Text("正在读取 Steam 评价…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SteamStyle.secondary)
+                }
+                .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(SteamStyle.surfaceLight, in: RoundedRectangle(cornerRadius: 14))
-            } else if let reviewError {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(reviewError)
-                        .font(.caption)
-                        .foregroundStyle(SteamStyle.secondaryText)
+                .background(SteamStyle.card)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(reviewsError ?? "暂时无法读取评价")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SteamStyle.secondary)
 
                     Button("重新加载评价") {
-                        Task { await loadReviews() }
+                        Task {
+                            await loadReviews()
+                        }
                     }
-                    .font(.subheadline.bold())
-                    .foregroundStyle(SteamStyle.steamBlue)
+                    .font(.system(size: 12, weight: .semibold))
+                    .tint(SteamStyle.cyan)
                 }
+                .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
-                .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 14))
-            } else if !loadingReviews {
-                Text("暂无可显示的评价信息")
-                    .font(.subheadline)
-                    .foregroundStyle(SteamStyle.secondaryText)
+                .background(SteamStyle.card)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
             }
         }
-        .padding(.horizontal, 16)
     }
 
     private var descriptionSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("游戏简介", icon: "text.alignleft")
-
-            if loadingDetails {
-                ProgressView()
-                    .tint(SteamStyle.steamBlue)
-            } else if let details {
-                Text(details.shortDescription)
-                    .font(.subheadline)
-                    .foregroundStyle(SteamStyle.secondaryText)
-                    .lineSpacing(5)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text("暂时无法加载游戏简介。")
-                    .font(.subheadline)
-                    .foregroundStyle(SteamStyle.secondaryText)
-            }
-        }
-        .padding(16)
-        .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 16))
-        .padding(.horizontal, 16)
-    }
-
-    private var infoSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("游戏信息", icon: "info.circle.fill")
+            Text("游戏介绍")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
 
             if let details {
-                if !details.developers.isEmpty {
-                    infoRow(
-                        label: "开发商",
-                        value: details.developers.joined(separator: "、")
-                    )
-                }
-
-                if !details.genres.isEmpty {
-                    infoRow(
-                        label: "游戏类型",
-                        value: details.genres.joined(separator: "、")
-                    )
-                }
-
-                if details.developers.isEmpty && details.genres.isEmpty {
-                    Text("暂无更多信息")
-                        .font(.subheadline)
-                        .foregroundStyle(SteamStyle.secondaryText)
-                }
+                Text(details.description.isEmpty ? "暂无游戏介绍" : details.description)
+                    .font(.system(size: 13))
+                    .foregroundStyle(SteamStyle.secondary)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if loadingDetails {
-                ProgressView().tint(SteamStyle.steamBlue)
+                ProgressView()
+                    .tint(SteamStyle.cyan)
             } else {
-                Text("游戏信息暂不可用")
-                    .font(.subheadline)
-                    .foregroundStyle(SteamStyle.secondaryText)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(detailsError ?? "详情加载失败")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SteamStyle.secondary)
+
+                    Button("重新加载详情") {
+                        Task {
+                            await loadDetails()
+                        }
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .tint(SteamStyle.cyan)
+                }
             }
         }
-        .padding(16)
-        .background(SteamStyle.surface, in: RoundedRectangle(cornerRadius: 16))
-        .padding(.horizontal, 16)
+    }
+
+    private var informationSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("游戏信息")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+
+            if let details {
+                infoRow("开发商", details.developers.joined(separator: "、"))
+                infoRow("发行商", details.publishers.joined(separator: "、"))
+                infoRow("类型", details.genres.joined(separator: "、"))
+            } else if loadingDetails {
+                ProgressView()
+                    .tint(SteamStyle.cyan)
+            } else {
+                Text("游戏信息暂时不可用")
+                    .font(.system(size: 12))
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+        }
+        .padding(15)
+        .background(SteamStyle.card)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func infoRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+                .frame(width: 55, alignment: .leading)
+
+            Text(value.isEmpty ? "暂无信息" : value)
+                .font(.system(size: 12))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var screenshotsSection: some View {
-        Group {
-            if let details, !details.screenshots.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    sectionTitle("游戏截图", icon: "photo.on.rectangle.angled")
+        VStack(alignment: .leading, spacing: 12) {
+            Text("游戏截图")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
-                            ForEach(
-                                Array(details.screenshots.prefix(8).enumerated()),
-                                id: \.offset
-                            ) { _, url in
-                                AsyncImage(url: url) { phase in
-                                    if let image = phase.image {
-                                        image
-                                            .resizable()
-                                            .scaledToFill()
-                                    } else {
-                                        ZStack {
-                                            SteamStyle.surfaceLight
-                                            ProgressView().tint(SteamStyle.steamBlue)
-                                        }
-                                    }
+            if let screenshots = details?.screenshots,
+               !screenshots.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(
+                            Array(screenshots.prefix(8).enumerated()),
+                            id: \.offset
+                        ) { _, url in
+                            AsyncImage(url: URL(string: url)) { phase in
+                                if let image = phase.image {
+                                    image
+                                        .resizable()
+                                        .scaledToFill()
+                                } else {
+                                    SteamStyle.cardLight
                                 }
-                                .frame(width: 270, height: 152)
-                                .clipShape(RoundedRectangle(cornerRadius: 12))
                             }
+                            .frame(width: 250, height: 140)
+                            .clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
                         }
                     }
                 }
-                .padding(.horizontal, 16)
+            } else if loadingDetails {
+                ProgressView()
+                    .tint(SteamStyle.cyan)
+            } else {
+                Text("暂无截图")
+                    .font(.system(size: 12))
+                    .foregroundStyle(SteamStyle.secondary)
             }
         }
     }
 
     private var claimButton: some View {
         Button {
-            openURL(game.storeURL)
+            UIApplicationHelper.open(game.storeURL)
         } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "gift.fill")
-                    .font(.system(size: 18, weight: .bold))
-
-                Text("确认领取")
+            HStack(spacing: 9) {
+                Image(systemName: "arrow.up.right.square")
                     .font(.system(size: 17, weight: .bold))
 
-                Spacer()
-
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 14, weight: .bold))
+                Text("确认领取")
+                    .font(.system(size: 16, weight: .bold))
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 20)
-            .frame(height: 56)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
             .background(
                 LinearGradient(
                     colors: [
-                        Color(red: 0.16, green: 0.48, blue: 0.76),
-                        Color(red: 0.20, green: 0.36, blue: 0.65)
+                        SteamStyle.blue,
+                        Color(red: 0.12, green: 0.39, blue: 0.66)
                     ],
                     startPoint: .leading,
                     endPoint: .trailing
-                ),
-                in: RoundedRectangle(cornerRadius: 15)
+                )
             )
+            .clipShape(RoundedRectangle(cornerRadius: 14))
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 16)
-    }
-
-    private func sectionTitle(_ title: String, icon: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .foregroundStyle(SteamStyle.steamBlue)
-
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(.white)
-
-            Spacer()
-        }
-    }
-
-    private func infoRow(label: String, value: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(label)
-                .font(.subheadline)
-                .foregroundStyle(SteamStyle.secondaryText)
-                .frame(width: 68, alignment: .leading)
-
-            Text(value)
-                .font(.subheadline)
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 
     @MainActor
@@ -1267,29 +1304,47 @@ struct SteamGameDetailView: View {
         loadingDetails = true
         detailsError = nil
 
+        defer {
+            loadingDetails = false
+        }
+
         do {
             details = try await SteamAPI.fetchDetails(appID: game.id)
         } catch {
             detailsError = error.localizedDescription
         }
-
-        loadingDetails = false
     }
 
     @MainActor
     private func loadReviews() async {
         loadingReviews = true
-        reviewError = nil
+        reviewsError = nil
 
-        do {
-            review = try await SteamAPI.fetchReviews(appID: game.id)
-        } catch {
-            reviewError = error.localizedDescription
+        defer {
+            loadingReviews = false
         }
 
-        loadingReviews = false
+        do {
+            reviews = try await SteamAPI.fetchReviews(appID: game.id)
+        } catch {
+            reviewsError = error.localizedDescription
+        }
     }
 }
+
+// MARK: - 打开领取页面
+
+enum UIApplicationHelper {
+    static func open(_ url: URL) {
+        #if canImport(UIKit)
+        UIApplication.shared.open(url)
+        #endif
+    }
+}
+
+#if canImport(UIKit)
+import UIKit
+#endif
 
 #Preview {
     ContentView()
