@@ -477,7 +477,6 @@ enum SteamAPI {
             "https://store.steampowered.com/search/results/",
             queryItems: [
                 URLQueryItem(name: "term", value: term),
-                URLQueryItem(name: "category1", value: "998"),
                 URLQueryItem(name: "json", value: "1"),
                 URLQueryItem(name: "count", value: "30"),
                 URLQueryItem(name: "cc", value: countryCode),
