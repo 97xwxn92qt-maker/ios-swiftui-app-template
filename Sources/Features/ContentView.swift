@@ -590,7 +590,7 @@ private struct SteamHomeView: View {
                     .foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 5) {
-                Text("永久限免助手")
+                Text("Steam Games")
                     .font(.system(size: 23, weight: .bold))
                     .foregroundStyle(.white)
                 Text("发现 Steam 限时免费好游戏")
