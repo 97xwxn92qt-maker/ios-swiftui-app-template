@@ -1,10 +1,9 @@
-
 import SwiftUI
 import Combine
 import Foundation
 import UIKit
 
-// MARK: - Steam 风格
+// MARK: - 样式
 
 private enum SteamStyle {
     static let background = Color(red: 0.055, green: 0.075, blue: 0.12)
@@ -17,8 +16,6 @@ private enum SteamStyle {
     static let border = Color.white.opacity(0.08)
 }
 
-// MARK: - Epic 风格
-
 private enum EpicStyle {
     static let background = Color(red: 0.055, green: 0.055, blue: 0.065)
     static let panel = Color(red: 0.105, green: 0.105, blue: 0.12)
@@ -28,15 +25,13 @@ private enum EpicStyle {
     static let border = Color.white.opacity(0.10)
 }
 
-// MARK: - Steam 游戏类型
+// MARK: - Steam 模型
 
 enum SteamAppKind: String {
     case game = "游戏本体"
     case dlc = "DLC 内容"
     case other = "其他内容"
 }
-
-// MARK: - Steam 游戏模型
 
 struct SteamGame: Identifiable, Hashable {
     let id: Int
@@ -60,7 +55,48 @@ struct SteamGame: Identifiable, Hashable {
     }
 }
 
-// MARK: - Epic 游戏模型
+// 新增：Steam 免费游戏
+
+struct SteamFreeGame: Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let imageURL: String
+    let releaseDate: Date?
+
+    var storeURL: URL {
+        URL(string: "https://store.steampowered.com/app/\(id)/")!
+    }
+
+    static func == (lhs: SteamFreeGame, rhs: SteamFreeGame) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+// 新增：Steam 搜索结果
+
+struct SteamSearchGame: Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let imageURL: String
+
+    var storeURL: URL {
+        URL(string: "https://store.steampowered.com/app/\(id)/")!
+    }
+
+    static func == (lhs: SteamSearchGame, rhs: SteamSearchGame) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+// MARK: - Epic 模型
 
 struct EpicGame: Identifiable, Hashable {
     let id: String
@@ -80,20 +116,14 @@ struct EpicGame: Identifiable, Hashable {
     }
 }
 
-// MARK: - 网络请求工具
+// MARK: - 网络请求
 
 private enum StoreHTTP {
     static func data(from url: URL) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 25
-        request.setValue(
-            "application/json, text/plain, */*",
-            forHTTPHeaderField: "Accept"
-        )
-        request.setValue(
-            "Mozilla/5.0",
-            forHTTPHeaderField: "User-Agent"
-        )
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -101,9 +131,7 @@ private enum StoreHTTP {
             throw NSError(
                 domain: "StoreHTTP",
                 code: -1,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "无法获取服务器响应"
-                ]
+                userInfo: [NSLocalizedDescriptionKey: "无法获取服务器响应"]
             )
         }
 
@@ -111,10 +139,7 @@ private enum StoreHTTP {
             throw NSError(
                 domain: "StoreHTTP",
                 code: http.statusCode,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "服务器返回 HTTP \(http.statusCode)"
-                ]
+                userInfo: [NSLocalizedDescriptionKey: "服务器返回 HTTP \(http.statusCode)"]
             )
         }
 
@@ -130,15 +155,13 @@ private enum StoreHTTP {
             throw NSError(
                 domain: "StoreHTTP",
                 code: -2,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "服务器返回的数据无法解析"
-                ]
+                userInfo: [NSLocalizedDescriptionKey: "服务器返回的数据无法解析"]
             )
         }
     }
 }
 
-// MARK: - Steam API（保留原有逻辑）
+// MARK: - Steam API
 
 enum SteamAPI {
     private static let countryCode = "sg"
@@ -157,16 +180,33 @@ enum SteamAPI {
     }
 
     private static func makeURL(
-        _ string: String,
+        _ address: String,
         queryItems: [URLQueryItem]
     ) -> URL? {
-        guard var components = URLComponents(string: string) else {
+        guard var components = URLComponents(string: address) else {
             return nil
         }
-
         components.queryItems = queryItems
         return components.url
     }
+
+    private static func intValue(_ value: Any?) -> Int {
+        if let number = value as? Int { return number }
+        if let text = value as? String { return Int(text) ?? 0 }
+        return 0
+    }
+
+    private static func imageFromItem(_ item: [String: Any]) -> String {
+        let direct = string(item["tiny_image"])
+        if direct.hasPrefix("https://") { return direct }
+
+        let logo = string(item["logo"])
+        if logo.hasPrefix("https://") { return logo }
+
+        return ""
+    }
+
+    // 原有功能：限时免费游戏和 DLC
 
     static func fetchFreeGames() async throws -> [SteamGame] {
         guard let url = makeURL(
@@ -190,17 +230,14 @@ enum SteamAPI {
         func addCandidate(_ id: Int, _ name: String) {
             guard id > 0, !seen.contains(id) else { return }
             seen.insert(id)
-            candidates.append((id: id, name: name))
+            candidates.append((id, name))
         }
 
         if let items = root["items"] as? [[String: Any]] {
             for item in items {
-                let id = (item["id"] as? Int)
-                    ?? Int(string(item["id"]))
-                    ?? (item["appid"] as? Int)
-                    ?? Int(string(item["appid"]))
-                    ?? 0
-
+                let id = intValue(item["id"]) != 0
+                    ? intValue(item["id"])
+                    : intValue(item["appid"])
                 addCandidate(id, string(item["name"]))
             }
         }
@@ -214,34 +251,23 @@ enum SteamAPI {
             ]
 
             for pattern in patterns {
-                guard let regex = try? NSRegularExpression(
-                    pattern: pattern
-                ) else {
+                guard let regex = try? NSRegularExpression(pattern: pattern) else {
                     continue
                 }
 
                 let nsHTML = html as NSString
                 let matches = regex.matches(
                     in: html,
-                    range: NSRange(
-                        location: 0,
-                        length: nsHTML.length
-                    )
+                    range: NSRange(location: 0, length: nsHTML.length)
                 )
 
                 for match in matches where match.numberOfRanges > 1 {
-                    let idString = nsHTML.substring(
-                        with: match.range(at: 1)
-                    )
-
+                    let idString = nsHTML.substring(with: match.range(at: 1))
                     if let id = Int(idString) {
-                        addCandidate(
-                            id,
-                            extractName(
-                                around: match.range.location,
-                                html: html
-                            )
-                        )
+                        addCandidate(id, extractName(
+                            around: match.range.location,
+                            html: html
+                        ))
                     }
                 }
             }
@@ -251,32 +277,17 @@ enum SteamAPI {
             for item in items {
                 let logo = string(item["logo"])
 
-                for pattern in [
-                    #"/steam/apps/(\d+)/"#,
-                    #"/apps/(\d+)/"#
-                ] {
-                    guard let regex = try? NSRegularExpression(
-                        pattern: pattern
-                    ) else {
+                for pattern in [#"/steam/apps/(\d+)/"#, #"/apps/(\d+)/"#] {
+                    guard let regex = try? NSRegularExpression(pattern: pattern) else {
                         continue
                     }
 
                     let nsLogo = logo as NSString
-                    let range = NSRange(
-                        location: 0,
-                        length: nsLogo.length
-                    )
+                    let range = NSRange(location: 0, length: nsLogo.length)
 
-                    if let match = regex.firstMatch(
-                        in: logo,
-                        range: range
-                    ),
+                    if let match = regex.firstMatch(in: logo, range: range),
                        match.numberOfRanges > 1,
-                       let id = Int(
-                           nsLogo.substring(
-                               with: match.range(at: 1)
-                           )
-                       ) {
+                       let id = Int(nsLogo.substring(with: match.range(at: 1))) {
                         addCandidate(id, string(item["name"]))
                     }
                 }
@@ -287,10 +298,7 @@ enum SteamAPI {
             throw NSError(
                 domain: "SteamAPI",
                 code: -3,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "没有解析到 Steam 商品，请稍后重试"
-                ]
+                userInfo: [NSLocalizedDescriptionKey: "没有解析到 Steam 商品，请稍后重试"]
             )
         }
 
@@ -301,44 +309,25 @@ enum SteamAPI {
                 guard let detailURL = makeURL(
                     "https://store.steampowered.com/api/appdetails",
                     queryItems: [
-                        URLQueryItem(
-                            name: "appids",
-                            value: "\(candidate.id)"
-                        ),
-                        URLQueryItem(
-                            name: "cc",
-                            value: countryCode
-                        ),
-                        URLQueryItem(
-                            name: "l",
-                            value: language
-                        )
+                        URLQueryItem(name: "appids", value: "\(candidate.id)"),
+                        URLQueryItem(name: "cc", value: countryCode),
+                        URLQueryItem(name: "l", value: language)
                     ]
-                ) else {
-                    continue
-                }
+                ) else { continue }
 
                 let detailJSON = try await requestJSON(detailURL)
-                let appRoot = dictionary(
-                    dictionary(detailJSON)["\(candidate.id)"]
-                )
+                let appRoot = dictionary(dictionary(detailJSON)["\(candidate.id)"])
 
-                guard appRoot["success"] as? Bool == true else {
-                    continue
-                }
+                guard appRoot["success"] as? Bool == true else { continue }
 
                 let data = dictionary(appRoot["data"])
                 let name = string(data["name"])
                 let appType = string(data["type"]).lowercased()
                 let isDLC = appType == "dlc"
 
-                guard appType == "game" || isDLC else {
-                    continue
-                }
+                guard appType == "game" || isDLC else { continue }
 
-                let packageGroups =
-                    data["package_groups"] as? [[String: Any]] ?? []
-
+                let packageGroups = data["package_groups"] as? [[String: Any]] ?? []
                 var isLimitedFree = false
                 var originalPriceCents: Int?
 
@@ -346,29 +335,12 @@ enum SteamAPI {
                     let subs = group["subs"] as? [[String: Any]] ?? []
 
                     for sub in subs {
-                        let optionText =
-                            string(sub["option_text"]).lowercased()
-
-                        let discountPrice =
-                            (sub["price_in_cents_with_discount"] as? Int)
-                            ?? Int(
-                                string(
-                                    sub["price_in_cents_with_discount"]
-                                )
-                            )
-
-                        let originalCents =
-                            (sub["price_in_cents_without_discount"] as? Int)
-                            ?? Int(
-                                string(
-                                    sub["price_in_cents_without_discount"]
-                                )
-                            )
+                        let optionText = string(sub["option_text"]).lowercased()
+                        let discountPrice = intValue(sub["price_in_cents_with_discount"])
+                        let originalCents = intValue(sub["price_in_cents_without_discount"])
 
                         let matches =
-                            optionText.contains(
-                                "limited free promotional package"
-                            )
+                            optionText.contains("limited free promotional package")
                             || optionText.contains("limited-time free")
                             || optionText.contains("limited time free")
                             || optionText.contains("限时免费")
@@ -386,9 +358,7 @@ enum SteamAPI {
 
                 guard isLimitedFree else { continue }
 
-                let imageURL = string(data["header_image"])
                 let priceText: String
-
                 if let cents = originalPriceCents, cents > 0 {
                     priceText = formatSGD(cents)
                 } else {
@@ -399,7 +369,7 @@ enum SteamAPI {
                     SteamGame(
                         id: candidate.id,
                         name: name.isEmpty ? candidate.name : name,
-                        imageURL: imageURL,
+                        imageURL: string(data["header_image"]),
                         originalPrice: priceText,
                         kind: isDLC ? .dlc : .game
                     )
@@ -410,66 +380,194 @@ enum SteamAPI {
         }
 
         return games.sorted {
-            if $0.isDLC != $1.isDLC {
-                return !$0.isDLC
-            }
-
-            return $0.name.localizedCompare($1.name)
-                == .orderedAscending
+            if $0.isDLC != $1.isDLC { return !$0.isDLC }
+            return $0.name.localizedCompare($1.name) == .orderedAscending
         }
     }
 
-    private static func extractName(
-        around location: Int,
-        html: String
-    ) -> String {
+    // 新增功能：获取当前免费游戏目录
+
+    static func fetchFreeToPlayGames() async throws -> [SteamFreeGame] {
+        guard let url = makeURL(
+            "https://store.steampowered.com/search/results/",
+            queryItems: [
+                URLQueryItem(name: "category1", value: "998"),
+                URLQueryItem(name: "maxprice", value: "free"),
+                URLQueryItem(name: "sort_by", value: "Released_DESC"),
+                URLQueryItem(name: "json", value: "1"),
+                URLQueryItem(name: "count", value: "50"),
+                URLQueryItem(name: "cc", value: countryCode),
+                URLQueryItem(name: "l", value: language)
+            ]
+        ) else {
+            throw URLError(.badURL)
+        }
+
+        let root = dictionary(try await requestJSON(url))
+        let items = root["items"] as? [[String: Any]] ?? []
+
+        guard !items.isEmpty else {
+            throw NSError(
+                domain: "SteamAPI",
+                code: -4,
+                userInfo: [NSLocalizedDescriptionKey: "Steam 没有返回免费游戏"]
+            )
+        }
+
+        var results: [SteamFreeGame] = []
+        var seen = Set<Int>()
+
+        for item in items {
+            let id = intValue(item["id"]) != 0
+                ? intValue(item["id"])
+                : intValue(item["appid"])
+
+            let name = string(item["name"])
+            guard id > 0, !name.isEmpty, !seen.contains(id) else { continue }
+            seen.insert(id)
+
+            do {
+                guard let detailURL = makeURL(
+                    "https://store.steampowered.com/api/appdetails",
+                    queryItems: [
+                        URLQueryItem(name: "appids", value: "\(id)"),
+                        URLQueryItem(name: "cc", value: countryCode),
+                        URLQueryItem(name: "l", value: language)
+                    ]
+                ) else { continue }
+
+                let detailJSON = try await requestJSON(detailURL)
+                let appRoot = dictionary(dictionary(detailJSON)["\(id)"])
+
+                guard appRoot["success"] as? Bool == true else { continue }
+
+                let data = dictionary(appRoot["data"])
+                guard string(data["type"]).lowercased() == "game" else { continue }
+                guard data["is_free"] as? Bool == true else { continue }
+
+                let releaseText = string(dictionary(data["release_date"])["date"])
+
+                results.append(
+                    SteamFreeGame(
+                        id: id,
+                        name: string(data["name"]).isEmpty ? name : string(data["name"]),
+                        imageURL: string(data["header_image"]).isEmpty
+                            ? imageFromItem(item)
+                            : string(data["header_image"]),
+                        releaseDate: parseSteamReleaseDate(releaseText)
+                    )
+                )
+            } catch {
+                continue
+            }
+        }
+
+        return results.sorted {
+            ($0.releaseDate ?? .distantPast) > ($1.releaseDate ?? .distantPast)
+        }
+    }
+
+    // 新增功能：Steam 商店搜索
+
+    static func searchGames(_ keyword: String) async throws -> [SteamSearchGame] {
+        let term = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return [] }
+
+        guard let url = makeURL(
+            "https://store.steampowered.com/search/results/",
+            queryItems: [
+                URLQueryItem(name: "term", value: term),
+                URLQueryItem(name: "category1", value: "998"),
+                URLQueryItem(name: "json", value: "1"),
+                URLQueryItem(name: "count", value: "30"),
+                URLQueryItem(name: "cc", value: countryCode),
+                URLQueryItem(name: "l", value: language)
+            ]
+        ) else {
+            throw URLError(.badURL)
+        }
+
+        let root = dictionary(try await requestJSON(url))
+        let items = root["items"] as? [[String: Any]] ?? []
+
+        var results: [SteamSearchGame] = []
+        var seen = Set<Int>()
+
+        for item in items {
+            let id = intValue(item["id"]) != 0
+                ? intValue(item["id"])
+                : intValue(item["appid"])
+            let name = string(item["name"])
+
+            guard id > 0, !name.isEmpty, !seen.contains(id) else { continue }
+            seen.insert(id)
+
+            results.append(
+                SteamSearchGame(
+                    id: id,
+                    name: name,
+                    imageURL: imageFromItem(item)
+                )
+            )
+        }
+
+        return results
+    }
+
+    private static func parseSteamReleaseDate(_ value: String) -> Date? {
+        guard !value.isEmpty else { return nil }
+
+        let formats = [
+            "d MMM, yyyy",
+            "MMM d, yyyy",
+            "yyyy年M月d日",
+            "yyyy-MM-dd",
+            "M月d日, yyyy"
+        ]
+
+        for format in formats {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone.current
+            formatter.dateFormat = format
+
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
+
+        return nil
+    }
+
+    private static func extractName(around location: Int, html: String) -> String {
         let start = max(0, location - 500)
         let end = min(html.count, location + 1000)
 
-        let lowerIndex = html.index(
-            html.startIndex,
-            offsetBy: start
-        )
-
-        let upperIndex = html.index(
-            html.startIndex,
-            offsetBy: end
-        )
-
+        let lowerIndex = html.index(html.startIndex, offsetBy: start)
+        let upperIndex = html.index(html.startIndex, offsetBy: end)
         let fragment = String(html[lowerIndex..<upperIndex])
 
         guard let regex = try? NSRegularExpression(
             pattern: #"class="title">([^<]+)</span>"#
-        ) else {
-            return ""
-        }
+        ) else { return "" }
 
         let nsFragment = fragment as NSString
-        let range = NSRange(
-            location: 0,
-            length: nsFragment.length
-        )
+        let range = NSRange(location: 0, length: nsFragment.length)
 
-        guard let match = regex.firstMatch(
-            in: fragment,
-            range: range
-        ),
-              match.numberOfRanges > 1 else {
-            return ""
-        }
+        guard let match = regex.firstMatch(in: fragment, range: range),
+              match.numberOfRanges > 1 else { return "" }
 
         return nsFragment.substring(with: match.range(at: 1))
     }
 
     private static func formatSGD(_ cents: Int) -> String {
         (Double(cents) / 100).formatted(
-            .currency(code: "SGD")
-                .locale(Locale(identifier: "en_SG"))
+            .currency(code: "SGD").locale(Locale(identifier: "en_SG"))
         )
     }
 }
 
-// MARK: - Epic Games Store API
+// MARK: - Epic API
 
 enum EpicAPI {
     private static func string(_ value: Any?) -> String {
@@ -500,16 +598,13 @@ enum EpicAPI {
             let id = string(product["id"])
             let title = string(product["title"])
 
-            guard !id.isEmpty,
-                  !title.isEmpty,
-                  !seen.contains(id) else {
+            guard !id.isEmpty, !title.isEmpty, !seen.contains(id) else {
                 continue
             }
 
             let price = dictionary(product["price"])
             let totalPrice = dictionary(price["totalPrice"])
-            let discountPrice =
-                (totalPrice["discountPrice"] as? Int) ?? -1
+            let discountPrice = totalPrice["discountPrice"] as? Int ?? -1
 
             guard discountPrice == 0 else { continue }
 
@@ -521,15 +616,13 @@ enum EpicAPI {
 
             for promotionGroup in activePromotions {
                 let offers =
-                    promotionGroup["promotionalOffers"] as? [[String: Any]]
-                    ?? []
+                    promotionGroup["promotionalOffers"] as? [[String: Any]] ?? []
 
                 for offer in offers {
                     let start = parseDate(string(offer["startDate"]))
                     let end = parseDate(string(offer["endDate"]))
 
-                    if let end,
-                       end > Date(),
+                    if let end, end > Date(),
                        start == nil || (start ?? .distantPast) <= Date() {
                         endDate = end
                         break
@@ -539,12 +632,9 @@ enum EpicAPI {
                 if endDate != nil { break }
             }
 
-            // 只显示当前正在进行且可免费领取的促销。
             guard let validEndDate = endDate else { continue }
 
-            let keyImages =
-                product["keyImages"] as? [[String: Any]] ?? []
-
+            let keyImages = product["keyImages"] as? [[String: Any]] ?? []
             let preferredTypes = [
                 "OfferImageWide",
                 "DieselStoreFrontWide",
@@ -563,11 +653,9 @@ enum EpicAPI {
                 $0.hasPrefix("https://")
             }) ?? ""
 
-            // 修复点：不再直接把任意 pageSlug 拼成固定商品链接。
             let storeURL = makeStoreURL(product)
 
             let originalPrice: String
-
             if let original = totalPrice["originalPrice"] as? Int,
                original > 0 {
                 let currencyCode = string(totalPrice["currencyCode"])
@@ -579,13 +667,11 @@ enum EpicAPI {
                 originalPrice = "免费"
             }
 
-            let description = string(product["description"])
-
             result.append(
                 EpicGame(
                     id: id,
                     name: title,
-                    description: description,
+                    description: string(product["description"]),
                     imageURL: imageURL,
                     originalPrice: originalPrice,
                     endDate: validEndDate,
@@ -597,28 +683,22 @@ enum EpicAPI {
         }
 
         return result.sorted {
-            ($0.endDate ?? .distantFuture)
-                < ($1.endDate ?? .distantFuture)
+            ($0.endDate ?? .distantFuture) < ($1.endDate ?? .distantFuture)
         }
     }
 
-    // MARK: Epic 商品链接修复
+    // Epic 商品链接修复
 
-    private static func makeStoreURL(
-        _ product: [String: Any]
-    ) -> URL {
+    private static func makeStoreURL(_ product: [String: Any]) -> URL {
         let fallbackURL = URL(
             string: "https://store.epicgames.com/zh-CN/free-games"
         )!
 
         let catalogNs = dictionary(product["catalogNs"])
         let mappings = catalogNs["mappings"] as? [[String: Any]] ?? []
-        let offerMappings =
-            product["offerMappings"] as? [[String: Any]] ?? []
+        let offerMappings = product["offerMappings"] as? [[String: Any]] ?? []
 
-        // 优先使用明确提供的商品页面映射。
         let mappingCandidates = offerMappings + mappings
-
         var rawSlug = ""
 
         for mapping in mappingCandidates {
@@ -629,62 +709,41 @@ enum EpicAPI {
 
             let pageType = string(mapping["pageType"]).lowercased()
 
-            if pageType.isEmpty
-                || pageType == "product"
-                || pageType == "producthome" {
+            if pageType.isEmpty || pageType == "product" || pageType == "producthome" {
                 rawSlug = pageSlug
                 break
             }
         }
 
-        // 映射没有可用值时，再使用商品自身的 slug 字段。
-        if rawSlug.isEmpty {
-            rawSlug = string(product["productSlug"])
-        }
+        if rawSlug.isEmpty { rawSlug = string(product["productSlug"]) }
+        if rawSlug.isEmpty { rawSlug = string(product["urlSlug"]) }
 
-        if rawSlug.isEmpty {
-            rawSlug = string(product["urlSlug"])
-        }
+        guard !rawSlug.isEmpty else { return fallbackURL }
 
-        guard !rawSlug.isEmpty else {
-            return fallbackURL
-        }
-
-        // 如果字段带完整 URL，尝试提取其中的商品路径。
         if let suppliedURL = URL(string: rawSlug),
            let scheme = suppliedURL.scheme?.lowercased(),
            scheme == "https" || scheme == "http" {
             let host = suppliedURL.host?.lowercased() ?? ""
 
-            if host == "store.epicgames.com"
-                || host.hasSuffix(".epicgames.com") {
+            if host == "store.epicgames.com" || host.hasSuffix(".epicgames.com") {
                 return suppliedURL
             }
-
             return fallbackURL
         }
 
-        // 去除开头和结尾的斜杠，防止出现重复路径。
         let cleanedSlug = rawSlug
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
-        guard !cleanedSlug.isEmpty else {
-            return fallbackURL
-        }
+        guard !cleanedSlug.isEmpty else { return fallbackURL }
 
         let segments = cleanedSlug.split(separator: "/")
 
-        // 若 API 返回的是 p/xxx 或 bundles/xxx 路径，
-        // 保留原路径，避免重复添加 /p/。
         if segments.count >= 2 {
             let first = String(segments[0]).lowercased()
 
             if first == "p" || first == "bundles" {
-                let path = segments
-                    .map(String.init)
-                    .joined(separator: "/")
-
+                let path = segments.map(String.init).joined(separator: "/")
                 if let url = URL(
                     string: "https://store.epicgames.com/zh-CN/\(path)"
                 ) {
@@ -693,16 +752,15 @@ enum EpicAPI {
             }
         }
 
-        // 根据接口提供的商品类型决定默认路径。
         let offerType = string(product["offerType"]).uppercased()
         let path = offerType == "BUNDLE" ? "bundles" : "p"
 
         guard let encodedSlug = cleanedSlug.addingPercentEncoding(
             withAllowedCharacters: .urlPathAllowed
         ),
-              let url = URL(
-                string: "https://store.epicgames.com/zh-CN/\(path)/\(encodedSlug)"
-              ) else {
+        let url = URL(
+            string: "https://store.epicgames.com/zh-CN/\(path)/\(encodedSlug)"
+        ) else {
             return fallbackURL
         }
 
@@ -713,23 +771,15 @@ enum EpicAPI {
         guard !value.isEmpty else { return nil }
 
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [
-            .withInternetDateTime,
-            .withFractionalSeconds
-        ]
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        if let date = formatter.date(from: value) {
-            return date
-        }
+        if let date = formatter.date(from: value) { return date }
 
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: value)
     }
 
-    private static func formatPrice(
-        _ cents: Int,
-        currencyCode: String
-    ) -> String {
+    private static func formatPrice(_ cents: Int, currencyCode: String) -> String {
         let locale = Locale(
             identifier: currencyCode == "SGD" ? "en_SG" : "en_US"
         )
@@ -740,7 +790,7 @@ enum EpicAPI {
     }
 }
 
- // MARK: - Steam 数据管理（保留原有逻辑）
+// MARK: - 数据管理
 
 @MainActor
 final class SteamStore: ObservableObject {
@@ -762,7 +812,70 @@ final class SteamStore: ObservableObject {
     }
 }
 
-// MARK: - Epic 数据管理
+@MainActor
+final class SteamFreeStore: ObservableObject {
+    @Published var games: [SteamFreeGame] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    var recentGames: [SteamFreeGame] {
+        let limit = Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+        return games.filter {
+            guard let date = $0.releaseDate else { return false }
+            return date >= limit
+        }
+    }
+
+    var historicalGames: [SteamFreeGame] {
+        let limit = Calendar.current.date(byAdding: .day, value: -30, to: Date())!
+        return games.filter {
+            guard let date = $0.releaseDate else { return true }
+            return date < limit
+        }
+    }
+
+    func loadGames() async {
+        guard !isLoading else { return }
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            games = try await SteamAPI.fetchFreeToPlayGames()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+@MainActor
+final class SteamSearchStore: ObservableObject {
+    @Published var games: [SteamSearchGame] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    func search(_ keyword: String) async {
+        let term = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else {
+            games = []
+            errorMessage = nil
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            games = try await SteamAPI.searchGames(term)
+            if games.isEmpty {
+                errorMessage = "没有找到相关游戏，试试其他关键词"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+}
 
 @MainActor
 final class EpicStore: ObservableObject {
@@ -852,6 +965,10 @@ private struct SteamHomeView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 24) {
                         header
+
+                        // 新增入口
+                        featureEntry
+
                         summaryCard
 
                         if store.isLoading && store.games.isEmpty {
@@ -900,6 +1017,74 @@ private struct SteamHomeView: View {
         }
     }
 
+    private var featureEntry: some View {
+        VStack(spacing: 11) {
+            NavigationLink {
+                SteamFreeHomeView()
+            } label: {
+                featureRow(
+                    icon: "gamecontroller.fill",
+                    title: "Steam 免费开玩",
+                    subtitle: "发现 Steam 当前免费游戏",
+                    color: SteamStyle.green
+                )
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink {
+                SteamSearchView()
+            } label: {
+                featureRow(
+                    icon: "magnifyingglass",
+                    title: "搜索 Steam 游戏",
+                    subtitle: "输入游戏名称，查找商店商品",
+                    color: SteamStyle.cyan
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func featureRow(
+        icon: String,
+        title: String,
+        subtitle: String,
+        color: Color
+    ) -> some View {
+        HStack(spacing: 13) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(color)
+                .frame(width: 43, height: 43)
+                .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: 12))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .padding(13)
+        .background(
+            SteamStyle.card,
+            in: RoundedRectangle(cornerRadius: 15)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 15)
+                .stroke(SteamStyle.border, lineWidth: 1)
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 13) {
             ZStack {
@@ -934,9 +1119,7 @@ private struct SteamHomeView: View {
             Spacer(minLength: 0)
 
             Button {
-                Task {
-                    await store.loadGames()
-                }
+                Task { await store.loadGames() }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 16, weight: .semibold))
@@ -1047,10 +1230,7 @@ private struct SteamHomeView: View {
                     .foregroundStyle(SteamStyle.cyan)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(
-                        SteamStyle.blue.opacity(0.15),
-                        in: Capsule()
-                    )
+                    .background(SteamStyle.blue.opacity(0.15), in: Capsule())
             }
 
             LazyVStack(spacing: 15) {
@@ -1092,9 +1272,7 @@ private struct SteamHomeView: View {
                 .multilineTextAlignment(.center)
 
             Button {
-                Task {
-                    await store.loadGames()
-                }
+                Task { await store.loadGames() }
             } label: {
                 Label("重新加载", systemImage: "arrow.clockwise")
                     .font(.system(size: 14, weight: .semibold))
@@ -1107,10 +1285,7 @@ private struct SteamHomeView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(24)
-        .background(
-            SteamStyle.card,
-            in: RoundedRectangle(cornerRadius: 20)
-        )
+        .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 20))
     }
 
     private var emptyView: some View {
@@ -1140,8 +1315,7 @@ private struct SteamHomeView: View {
             .padding(.top, 2)
     }
 }
-
-// MARK: - Steam 卡片
+// MARK: - Steam 限时免费游戏卡片
 
 private struct GameCard: View {
     let game: SteamGame
@@ -1152,20 +1326,9 @@ private struct GameCard: View {
                 AsyncImage(url: URL(string: game.imageURL)) { phase in
                     switch phase {
                     case .success(let image):
-                        image.resizable()
-                            .aspectRatio(contentMode: .fill)
-
-                    case .failure:
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    case .failure, .empty:
                         imagePlaceholder
-
-                    case .empty:
-                        imagePlaceholder
-                            .overlay {
-                                ProgressView()
-                                    .tint(SteamStyle.cyan)
-                                    .scaleEffect(0.8)
-                            }
-
                     @unknown default:
                         imagePlaceholder
                     }
@@ -1180,30 +1343,20 @@ private struct GameCard: View {
                         .foregroundStyle(.white)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                        .frame(
-                            maxWidth: .infinity,
-                            alignment: .leading
-                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
                     HStack(spacing: 5) {
-                        Image(
-                            systemName: game.isDLC
-                                ? "square.stack.3d.up.fill"
-                                : "gamecontroller.fill"
-                        )
-
+                        Image(systemName: game.isDLC
+                              ? "square.stack.3d.up.fill"
+                              : "gamecontroller.fill")
                         Text(game.kind.rawValue)
                     }
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(
-                        game.isDLC ? SteamStyle.cyan : SteamStyle.blue
-                    )
+                    .foregroundStyle(game.isDLC ? SteamStyle.cyan : SteamStyle.blue)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
                     .background(
-                        (game.isDLC
-                            ? SteamStyle.cyan
-                            : SteamStyle.blue).opacity(0.12),
+                        (game.isDLC ? SteamStyle.cyan : SteamStyle.blue).opacity(0.12),
                         in: Capsule()
                     )
 
@@ -1298,6 +1451,462 @@ private struct GameCard: View {
     }
 }
 
+// MARK: - Steam 免费开玩页面
+
+private struct SteamFreeHomeView: View {
+    @StateObject private var store = SteamFreeStore()
+    @State private var selectedCategory = 0
+
+    private var displayedGames: [SteamFreeGame] {
+        selectedCategory == 0 ? store.recentGames : store.historicalGames
+    }
+
+    var body: some View {
+        ZStack {
+            SteamStyle.background.ignoresSafeArea()
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 20) {
+                    header
+
+                    Picker("分类", selection: $selectedCategory) {
+                        Text("最近免费").tag(0)
+                        Text("历史免费").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .tint(SteamStyle.cyan)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(selectedCategory == 0 ? "最近发行" : "较早发行")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.white)
+
+                            Text("Steam 当前免费游戏目录")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SteamStyle.secondary)
+                        }
+
+                        Spacer()
+
+                        Text("\(displayedGames.count) 款")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(SteamStyle.cyan)
+                    }
+
+                    if store.isLoading && store.games.isEmpty {
+                        loadingView
+                    } else if let error = store.errorMessage,
+                              store.games.isEmpty {
+                        errorView(error)
+                    } else if displayedGames.isEmpty {
+                        emptyView
+                    } else {
+                        LazyVStack(spacing: 13) {
+                            ForEach(displayedGames) { game in
+                                SteamFreeGameCard(game: game)
+                            }
+                        }
+                    }
+
+                    Text("分类依据游戏发布日期；免费状态以 Steam 商店页面为准。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(SteamStyle.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 8)
+                }
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 30)
+            }
+            .refreshable {
+                await store.loadGames()
+            }
+        }
+        .navigationTitle("Steam 免费开玩")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarColorScheme(.dark, for: .navigationBar)
+        .task {
+            if store.games.isEmpty {
+                await store.loadGames()
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("FREE TO PLAY")
+                    .font(.system(size: 11, weight: .black))
+                    .tracking(2)
+                    .foregroundStyle(SteamStyle.cyan)
+
+                Text("Steam 免费开玩")
+                    .font(.system(size: 23, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text("发现可以直接免费游玩的游戏")
+                    .font(.system(size: 12))
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+
+            Spacer()
+
+            Button {
+                Task { await store.loadGames() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(SteamStyle.cyan)
+                    .frame(width: 42, height: 42)
+                    .background(SteamStyle.cardLight, in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 12) {
+            ProgressView().tint(SteamStyle.cyan)
+            Text("正在获取 Steam 免费游戏…")
+                .font(.system(size: 13))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 60)
+    }
+
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 30))
+                .foregroundStyle(SteamStyle.cyan)
+
+            Text("获取失败")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+                .multilineTextAlignment(.center)
+
+            Button("重新加载") {
+                Task { await store.loadGames() }
+            }
+            .foregroundStyle(SteamStyle.cyan)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(25)
+        .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var emptyView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "gamecontroller")
+                .font(.system(size: 32))
+                .foregroundStyle(SteamStyle.cyan)
+
+            Text("这个分类暂时没有游戏")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+
+            Text("可以切换分类或下拉刷新")
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 55)
+    }
+}
+
+// MARK: - 免费游戏卡片
+
+private struct SteamFreeGameCard: View {
+    let game: SteamFreeGame
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 12) {
+                AsyncImage(url: URL(string: game.imageURL)) { phase in
+                    if let image = phase.image {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        ZStack {
+                            SteamStyle.cardLight
+                            Image(systemName: "gamecontroller.fill")
+                                .foregroundStyle(SteamStyle.cyan)
+                        }
+                    }
+                }
+                .frame(width: 118, height: 74)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(game.name)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+
+                    Text("免费游玩")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(SteamStyle.green)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(SteamStyle.green.opacity(0.13), in: Capsule())
+
+                    Text(releaseText)
+                        .font(.system(size: 10))
+                        .foregroundStyle(SteamStyle.secondary)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Button {
+                UIApplication.shared.open(game.storeURL)
+            } label: {
+                HStack {
+                    Image(systemName: "play.fill")
+                    Text("打开 Steam 游戏页面")
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                }
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 13)
+                .frame(height: 40)
+                .background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 15))
+        .overlay {
+            RoundedRectangle(cornerRadius: 15)
+                .stroke(SteamStyle.border, lineWidth: 1)
+        }
+    }
+
+    private var releaseText: String {
+        guard let date = game.releaseDate else {
+            return "发行日期未知"
+        }
+
+        return "发行日期：" + date.formatted(
+            .dateTime.year().month().day()
+        )
+    }
+}
+
+// MARK: - Steam 搜索页面
+
+private struct SteamSearchView: View {
+    @StateObject private var store = SteamSearchStore()
+    @State private var keyword = ""
+    @FocusState private var isInputFocused: Bool
+
+    var body: some View {
+        ZStack {
+            SteamStyle.background.ignoresSafeArea()
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 18) {
+                    searchHeader
+                    searchBar
+
+                    if store.isLoading {
+                        ProgressView()
+                            .tint(SteamStyle.cyan)
+                            .padding(.top, 40)
+                    } else if let error = store.errorMessage {
+                        VStack(spacing: 10) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 30))
+                                .foregroundStyle(SteamStyle.cyan)
+
+                            Text(error)
+                                .font(.system(size: 13))
+                                .foregroundStyle(SteamStyle.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 45)
+                    } else if !store.games.isEmpty {
+                        HStack {
+                            Text("搜索结果")
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundStyle(.white)
+
+                            Spacer()
+
+                            Text("\(store.games.count) 款")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SteamStyle.secondary)
+                        }
+
+                        LazyVStack(spacing: 12) {
+                            ForEach(store.games) { game in
+                                SteamSearchGameCard(game: game)
+                            }
+                        }
+                    } else {
+                        VStack(spacing: 12) {
+                            Image(systemName: "gamecontroller")
+                                .font(.system(size: 38))
+                                .foregroundStyle(SteamStyle.cyan)
+
+                            Text("搜索你想玩的 Steam 游戏")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(.white)
+
+                            Text("输入游戏名称，点击搜索查看商品")
+                                .font(.system(size: 12))
+                                .foregroundStyle(SteamStyle.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 55)
+                    }
+                }
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 30)
+            }
+        }
+        .navigationTitle("搜索 Steam 游戏")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarColorScheme(.dark, for: .navigationBar)
+    }
+
+    private var searchHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("STEAM SEARCH")
+                .font(.system(size: 11, weight: .black))
+                .tracking(2)
+                .foregroundStyle(SteamStyle.cyan)
+
+            Text("寻找下一款游戏")
+                .font(.system(size: 23, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text("搜索 Steam 商店中的游戏本体")
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(SteamStyle.secondary)
+
+            TextField("输入游戏名称", text: $keyword)
+                .font(.system(size: 14))
+                .foregroundStyle(.white)
+                .focused($isInputFocused)
+                .submitLabel(.search)
+                .onSubmit {
+                    performSearch()
+                }
+
+            if !keyword.isEmpty {
+                Button {
+                    keyword = ""
+                    store.games = []
+                    store.errorMessage = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(SteamStyle.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                performSearch()
+            } label: {
+                Text("搜索")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 10)
+                    .background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .background(SteamStyle.cardLight, in: RoundedRectangle(cornerRadius: 13))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13)
+                .stroke(SteamStyle.border, lineWidth: 1)
+        }
+    }
+
+    private func performSearch() {
+        isInputFocused = false
+        Task {
+            await store.search(keyword)
+        }
+    }
+}
+
+// MARK: - 搜索结果卡片
+
+private struct SteamSearchGameCard: View {
+    let game: SteamSearchGame
+
+    var body: some View {
+        Button {
+            UIApplication.shared.open(game.storeURL)
+        } label: {
+            HStack(spacing: 12) {
+                AsyncImage(url: URL(string: game.imageURL)) { phase in
+                    if let image = phase.image {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        ZStack {
+                            SteamStyle.cardLight
+                            Image(systemName: "gamecontroller.fill")
+                                .foregroundStyle(SteamStyle.cyan)
+                        }
+                    }
+                }
+                .frame(width: 105, height: 65)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(game.name)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    Text("Steam 商品 · App ID: \(game.id)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(SteamStyle.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(SteamStyle.cyan)
+            }
+            .padding(11)
+            .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 13))
+            .overlay {
+                RoundedRectangle(cornerRadius: 13)
+                    .stroke(SteamStyle.border, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Epic 限免页面
 
 private struct EpicHomeView: View {
@@ -1324,26 +1933,14 @@ private struct EpicHomeView: View {
                             VStack(alignment: .leading, spacing: 14) {
                                 HStack(alignment: .firstTextBaseline) {
                                     Text("本周免费游戏")
-                                        .font(
-                                            .system(
-                                                size: 22,
-                                                weight: .bold
-                                            )
-                                        )
+                                        .font(.system(size: 22, weight: .bold))
                                         .foregroundStyle(.white)
 
                                     Spacer()
 
                                     Text("\(store.games.count) 款")
-                                        .font(
-                                            .system(
-                                                size: 12,
-                                                weight: .medium
-                                            )
-                                        )
-                                        .foregroundStyle(
-                                            EpicStyle.secondary
-                                        )
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(EpicStyle.secondary)
                                 }
 
                                 ForEach(store.games) { game in
@@ -1352,16 +1949,11 @@ private struct EpicHomeView: View {
                             }
                         }
 
-                        Text(
-                            "数据来自 Epic Games Store · 实际价格、地区资格及截止时间以商店页面为准"
-                        )
-                        .font(.system(size: 10))
-                        .foregroundStyle(EpicStyle.secondary)
-                        .frame(
-                            maxWidth: .infinity,
-                            alignment: .leading
-                        )
-                        .padding(.top, 4)
+                        Text("数据来自 Epic Games Store · 实际价格、地区资格及截止时间以商店页面为准")
+                            .font(.system(size: 10))
+                            .foregroundStyle(EpicStyle.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
                     }
                     .frame(maxWidth: 620)
                     .frame(maxWidth: .infinity)
@@ -1396,13 +1988,7 @@ private struct EpicHomeView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("EPIC GAMES")
-                    .font(
-                        .system(
-                            size: 20,
-                            weight: .black,
-                            design: .rounded
-                        )
-                    )
+                    .font(.system(size: 20, weight: .black, design: .rounded))
                     .tracking(1.1)
                     .foregroundStyle(.white)
 
@@ -1415,9 +2001,7 @@ private struct EpicHomeView: View {
             Spacer()
 
             Button {
-                Task {
-                    await store.loadGames()
-                }
+                Task { await store.loadGames() }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 15, weight: .bold))
@@ -1438,22 +2022,17 @@ private struct EpicHomeView: View {
                 .foregroundStyle(Color.black)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
-                .background(
-                    Color.white,
-                    in: RoundedRectangle(cornerRadius: 5)
-                )
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 5))
 
             Text("免费游戏\n每周上新")
                 .font(.system(size: 32, weight: .black))
                 .foregroundStyle(.white)
                 .lineSpacing(1)
 
-            Text(
-                "领取后永久保留在你的 Epic 游戏库中（以商品具体领取规则为准）。"
-            )
-            .font(.system(size: 12))
-            .foregroundStyle(EpicStyle.secondary)
-            .lineSpacing(4)
+            Text("领取后永久保留在你的 Epic 游戏库中（以商品具体领取规则为准）。")
+                .font(.system(size: 12))
+                .foregroundStyle(EpicStyle.secondary)
+                .lineSpacing(4)
 
             HStack(spacing: 7) {
                 Circle()
@@ -1510,28 +2089,20 @@ private struct EpicHomeView: View {
                 .foregroundStyle(EpicStyle.secondary)
 
             Button {
-                Task {
-                    await store.loadGames()
-                }
+                Task { await store.loadGames() }
             } label: {
                 Text("重新加载")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(.black)
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
-                    .background(
-                        .white,
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
+                    .background(.white, in: RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EpicStyle.panel,
-            in: RoundedRectangle(cornerRadius: 14)
-        )
+        .background(EpicStyle.panel, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var emptyView: some View {
@@ -1540,18 +2111,13 @@ private struct EpicHomeView: View {
                 .font(.system(size: 17, weight: .bold))
                 .foregroundStyle(.white)
 
-            Text(
-                "也可能是 Epic 接口暂时没有返回可领取的促销信息。下拉刷新后再试。"
-            )
-            .font(.system(size: 12))
-            .foregroundStyle(EpicStyle.secondary)
+            Text("也可能是 Epic 接口暂时没有返回可领取的促销信息。下拉刷新后再试。")
+                .font(.system(size: 12))
+                .foregroundStyle(EpicStyle.secondary)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EpicStyle.panel,
-            in: RoundedRectangle(cornerRadius: 14)
-        )
+        .background(EpicStyle.panel, in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
@@ -1564,21 +2130,9 @@ private struct EpicGameCard: View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
                 AsyncImage(url: URL(string: game.imageURL)) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable()
-                            .aspectRatio(contentMode: .fill)
-
-                    case .empty:
-                        imagePlaceholder
-                            .overlay {
-                                ProgressView().tint(.white)
-                            }
-
-                    case .failure:
-                        imagePlaceholder
-
-                    @unknown default:
+                    if let image = phase.image {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
                         imagePlaceholder
                     }
                 }
@@ -1602,11 +2156,7 @@ private struct EpicGameCard: View {
                         .font(.system(size: 21, weight: .black))
                         .foregroundStyle(.white)
                         .lineLimit(2)
-                        .shadow(
-                            color: .black.opacity(0.35),
-                            radius: 4,
-                            y: 2
-                        )
+                        .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
                 }
                 .padding(16)
             }
@@ -1628,48 +2178,22 @@ private struct EpicGameCard: View {
 
                     VStack(alignment: .trailing, spacing: 4) {
                         Text("领取剩余时间")
-                            .font(
-                                .system(
-                                    size: 10,
-                                    weight: .medium
-                                )
-                            )
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(EpicStyle.secondary)
 
                         if let endDate = game.endDate {
-                            TimelineView(
-                                .periodic(from: .now, by: 60)
-                            ) { context in
-                                Text(
-                                    countdown(
-                                        until: endDate,
-                                        now: context.date
+                            TimelineView(.periodic(from: .now, by: 60)) { context in
+                                Text(countdown(until: endDate, now: context.date))
+                                    .font(.system(size: 15, weight: .black, design: .rounded))
+                                    .monospacedDigit()
+                                    .foregroundStyle(
+                                        endDate.timeIntervalSince(context.date) <= 3600
+                                        ? Color.orange : Color.white
                                     )
-                                )
-                                .font(
-                                    .system(
-                                        size: 15,
-                                        weight: .black,
-                                        design: .rounded
-                                    )
-                                )
-                                .monospacedDigit()
-                                .foregroundStyle(
-                                    endDate.timeIntervalSince(
-                                        context.date
-                                    ) <= 3600
-                                        ? Color.orange
-                                        : Color.white
-                                )
                             }
                         } else {
                             Text("截止时间暂不可用")
-                                .font(
-                                    .system(
-                                        size: 12,
-                                        weight: .semibold
-                                    )
-                                )
+                                .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(EpicStyle.secondary)
                         }
                     }
@@ -1689,20 +2213,14 @@ private struct EpicGameCard: View {
                     .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity)
                     .frame(height: 46)
-                    .background(
-                        Color.white,
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
             }
             .padding(14)
         }
         .padding(10)
-        .background(
-            EpicStyle.panel,
-            in: RoundedRectangle(cornerRadius: 15)
-        )
+        .background(EpicStyle.panel, in: RoundedRectangle(cornerRadius: 15))
         .overlay {
             RoundedRectangle(cornerRadius: 15)
                 .stroke(EpicStyle.border, lineWidth: 1)
@@ -1725,18 +2243,10 @@ private struct EpicGameCard: View {
         .frame(height: 190)
     }
 
-    private func countdown(
-        until endDate: Date,
-        now: Date
-    ) -> String {
-        let seconds = max(
-            0,
-            Int(endDate.timeIntervalSince(now))
-        )
+    private func countdown(until endDate: Date, now: Date) -> String {
+        let seconds = max(0, Int(endDate.timeIntervalSince(now)))
 
-        if seconds <= 0 {
-            return "已截止"
-        }
+        if seconds <= 0 { return "已截止" }
 
         let hours = seconds / 3600
         let minutes = (seconds % 3600) / 60
