@@ -7,7 +7,7 @@
 #   2. Update PRODUCT_BUNDLE_IDENTIFIER + INFOPLIST_KEY_CFBundleDisplayName.
 #   3. Rename the test target (e.g. AppNameTests) and its bundle id to match.
 #   4. Optionally rename Sources/App/AppNameApp.swift's `struct AppNameApp`.
-name: s1kou
+name: AppName
 
 options:
   bundleIdPrefix: com.example
