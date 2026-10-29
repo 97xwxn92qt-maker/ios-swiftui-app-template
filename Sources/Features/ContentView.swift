@@ -1,414 +1,746 @@
+
 import SwiftUI
-import Foundation
 import Combine
+import Foundation
 import UIKit
 
-// MARK: - App Theme
+// MARK: - Steam 风格
 
-enum AppStyle {
-    static let background = Color(red: 0.035, green: 0.055, blue: 0.105)
-    static let card = Color(red: 0.075, green: 0.105, blue: 0.175)
-    static let cardLight = Color(red: 0.105, green: 0.145, blue: 0.225)
-    static let blue = Color(red: 0.20, green: 0.55, blue: 1.00)
-    static let green = Color(red: 0.20, green: 0.78, blue: 0.49)
-    static let secondary = Color.white.opacity(0.68)
-    static let border = Color.white.opacity(0.09)
+private enum SteamStyle {
+    static let background = Color(red: 0.055, green: 0.075, blue: 0.12)
+    static let card = Color(red: 0.085, green: 0.115, blue: 0.17)
+    static let cardLight = Color(red: 0.12, green: 0.16, blue: 0.23)
+    static let blue = Color(red: 0.25, green: 0.65, blue: 0.96)
+    static let cyan = Color(red: 0.35, green: 0.83, blue: 0.91)
+    static let green = Color(red: 0.35, green: 0.83, blue: 0.55)
+    static let secondary = Color.white.opacity(0.62)
+    static let border = Color.white.opacity(0.08)
 }
 
-// MARK: - Models
+// MARK: - Epic 风格
 
-enum SteamItemKind: String, Hashable {
-    case game
-    case dlc
-
-    var title: String {
-        self == .dlc ? "DLC" : "游戏本体"
-    }
+private enum EpicStyle {
+    static let background = Color(red: 0.055, green: 0.055, blue: 0.065)
+    static let panel = Color(red: 0.105, green: 0.105, blue: 0.12)
+    static let panelLight = Color(red: 0.16, green: 0.16, blue: 0.18)
+    static let text = Color.white
+    static let secondary = Color.white.opacity(0.62)
+    static let border = Color.white.opacity(0.10)
 }
+
+// MARK: - Steam 游戏类型
+
+enum SteamAppKind: String {
+    case game = "游戏本体"
+    case dlc = "DLC 内容"
+    case other = "其他内容"
+}
+
+// MARK: - Steam 游戏模型
 
 struct SteamGame: Identifiable, Hashable {
-    let appID: Int
-    let name: String
-    let kind: SteamItemKind
-
-    var id: Int { appID }
+    let id: Int
+    var name: String
+    var imageURL: String
+    var originalPrice: String
+    var kind: SteamAppKind
 
     var storeURL: URL {
-        URL(string: "https://store.steampowered.com/app/\(appID)/")!
+        URL(string: "https://store.steampowered.com/app/\(id)/")!
+    }
+
+    var isDLC: Bool { kind == .dlc }
+
+    static func == (lhs: SteamGame, rhs: SteamGame) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
+
+// MARK: - Epic 游戏模型
 
 struct EpicGame: Identifiable, Hashable {
     let id: String
-    let title: String
+    let name: String
     let description: String
-    let imageURL: URL?
-    let productURL: URL
+    let imageURL: String
+    let originalPrice: String
     let endDate: Date?
-}
+    let storeURL: URL
 
-struct SteamAccount: Identifiable, Codable, Hashable {
-    var steamID64: String
-    var nickname: String
-    var avatarURL: String
-
-    var id: String { steamID64 }
-}
-
-// MARK: - Helpers
-
-enum AppHelpers {
-    static func parseDate(_ value: String?) -> Date? {
-        guard let value, !value.isEmpty else { return nil }
-
-        let iso = ISO8601DateFormatter()
-        if let date = iso.date(from: value) {
-            return date
-        }
-
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return iso.date(from: value)
+    static func == (lhs: EpicGame, rhs: EpicGame) -> Bool {
+        lhs.id == rhs.id
     }
 
-    static func safePath(_ value: String) -> String {
-        var allowed = CharacterSet.urlPathAllowed
-        allowed.remove(charactersIn: "/?#%")
-        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 
-// MARK: - Network
+// MARK: - 网络请求工具
 
-enum APIError: LocalizedError {
-    case invalidURL
-    case httpError
-    case noResults(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidURL:
-            return "请求网址无效。"
-        case .httpError:
-            return "网络请求失败，请检查网络后重试。"
-        case .noResults(let message):
-            return message
-        }
-    }
-}
-
-enum Network {
-    static func getData(_ url: URL) async throws -> Data {
+private enum StoreHTTP {
+    static func data(from url: URL) async throws -> Data {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 20
+        request.timeoutInterval = 25
         request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+            "application/json, text/plain, */*",
+            forHTTPHeaderField: "Accept"
+        )
+        request.setValue(
+            "Mozilla/5.0",
             forHTTPHeaderField: "User-Agent"
         )
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
-        guard let response = response as? HTTPURLResponse,
-              (200...299).contains(response.statusCode) else {
-            throw APIError.httpError
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(
+                domain: "StoreHTTP",
+                code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "无法获取服务器响应"
+                ]
+            )
+        }
+
+        guard (200...299).contains(http.statusCode) else {
+            throw NSError(
+                domain: "StoreHTTP",
+                code: http.statusCode,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "服务器返回 HTTP \(http.statusCode)"
+                ]
+            )
         }
 
         return data
     }
+
+    static func json(from url: URL) async throws -> Any {
+        let data = try await data(from: url)
+
+        do {
+            return try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw NSError(
+                domain: "StoreHTTP",
+                code: -2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "服务器返回的数据无法解析"
+                ]
+            )
+        }
+    }
 }
 
-// MARK: - Steam API
+// MARK: - Steam API（保留原有逻辑）
 
 enum SteamAPI {
-    static func fetchFreeGames() async throws -> [SteamGame] {
-        var components = URLComponents(
-            string: "https://store.steampowered.com/search/results/"
-        )!
+    private static let countryCode = "sg"
+    private static let language = "schinese"
 
-        components.queryItems = [
-            URLQueryItem(name: "query", value: ""),
-            URLQueryItem(name: "start", value: "0"),
-            URLQueryItem(name: "count", value: "100"),
-            URLQueryItem(name: "specials", value: "1"),
-            URLQueryItem(name: "maxprice", value: "free"),
-            URLQueryItem(name: "supportedlang", value: "schinese"),
-            URLQueryItem(name: "infinite", value: "1")
-        ]
+    private static func requestJSON(_ url: URL) async throws -> Any {
+        try await StoreHTTP.json(from: url)
+    }
 
-        guard let url = components.url else {
-            throw APIError.invalidURL
-        }
+    private static func dictionary(_ value: Any?) -> [String: Any] {
+        value as? [String: Any] ?? [:]
+    }
 
-        let data = try await Network.getData(url)
+    private static func string(_ value: Any?) -> String {
+        value as? String ?? ""
+    }
 
-        guard let root = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any] else {
-            throw APIError.noResults("无法解析 Steam 返回的数据。")
-        }
-
-        let items = root["items"] as? [[String: Any]] ?? []
-
-        let ids = items.compactMap { item -> Int? in
-            if let id = item["id"] as? Int {
-                return id
-            }
-            if let id = item["id"] as? String {
-                return Int(id)
-            }
+    private static func makeURL(
+        _ string: String,
+        queryItems: [URLQueryItem]
+    ) -> URL? {
+        guard var components = URLComponents(string: string) else {
             return nil
         }
 
-        if ids.isEmpty {
-            throw APIError.noResults(
-                "Steam 暂时没有返回商品。请稍后刷新。"
-            )
+        components.queryItems = queryItems
+        return components.url
+    }
+
+    static func fetchFreeGames() async throws -> [SteamGame] {
+        guard let url = makeURL(
+            "https://store.steampowered.com/search/results/",
+            queryItems: [
+                URLQueryItem(name: "specials", value: "1"),
+                URLQueryItem(name: "maxprice", value: "free"),
+                URLQueryItem(name: "json", value: "1"),
+                URLQueryItem(name: "count", value: "50"),
+                URLQueryItem(name: "cc", value: countryCode),
+                URLQueryItem(name: "l", value: language)
+            ]
+        ) else {
+            throw URLError(.badURL)
         }
 
-        return await withTaskGroup(
-            of: SteamGame?.self,
-            returning: [SteamGame].self
-        ) { group in
-            for appID in ids.prefix(35) {
-                group.addTask {
-                    do {
-                        return try await fetchPromotionalItem(appID: appID)
-                    } catch {
-                        return nil
+        let root = dictionary(try await requestJSON(url))
+        var candidates: [(id: Int, name: String)] = []
+        var seen = Set<Int>()
+
+        func addCandidate(_ id: Int, _ name: String) {
+            guard id > 0, !seen.contains(id) else { return }
+            seen.insert(id)
+            candidates.append((id: id, name: name))
+        }
+
+        if let items = root["items"] as? [[String: Any]] {
+            for item in items {
+                let id = (item["id"] as? Int)
+                    ?? Int(string(item["id"]))
+                    ?? (item["appid"] as? Int)
+                    ?? Int(string(item["appid"]))
+                    ?? 0
+
+                addCandidate(id, string(item["name"]))
+            }
+        }
+
+        let html = string(root["results_html"])
+
+        if !html.isEmpty {
+            let patterns = [
+                #"/app/(\d+)(?:/|")"#,
+                #"data-ds-appid="(\d+)""#
+            ]
+
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(
+                    pattern: pattern
+                ) else {
+                    continue
+                }
+
+                let nsHTML = html as NSString
+                let matches = regex.matches(
+                    in: html,
+                    range: NSRange(
+                        location: 0,
+                        length: nsHTML.length
+                    )
+                )
+
+                for match in matches where match.numberOfRanges > 1 {
+                    let idString = nsHTML.substring(
+                        with: match.range(at: 1)
+                    )
+
+                    if let id = Int(idString) {
+                        addCandidate(
+                            id,
+                            extractName(
+                                around: match.range.location,
+                                html: html
+                            )
+                        )
                     }
                 }
             }
+        }
 
-            var result: [SteamGame] = []
+        if let items = root["items"] as? [[String: Any]] {
+            for item in items {
+                let logo = string(item["logo"])
 
-            for await game in group {
-                if let game {
-                    result.append(game)
+                for pattern in [
+                    #"/steam/apps/(\d+)/"#,
+                    #"/apps/(\d+)/"#
+                ] {
+                    guard let regex = try? NSRegularExpression(
+                        pattern: pattern
+                    ) else {
+                        continue
+                    }
+
+                    let nsLogo = logo as NSString
+                    let range = NSRange(
+                        location: 0,
+                        length: nsLogo.length
+                    )
+
+                    if let match = regex.firstMatch(
+                        in: logo,
+                        range: range
+                    ),
+                       match.numberOfRanges > 1,
+                       let id = Int(
+                           nsLogo.substring(
+                               with: match.range(at: 1)
+                           )
+                       ) {
+                        addCandidate(id, string(item["name"]))
+                    }
                 }
             }
-
-            return result.sorted {
-                $0.name.localizedCaseInsensitiveCompare($1.name)
-                    == .orderedAscending
-            }
-        }
-    }
-
-    private static func fetchPromotionalItem(
-        appID: Int
-    ) async throws -> SteamGame? {
-        var components = URLComponents(
-            string: "https://store.steampowered.com/api/appdetails"
-        )!
-
-        components.queryItems = [
-            URLQueryItem(name: "appids", value: String(appID)),
-            URLQueryItem(name: "cc", value: "sg"),
-            URLQueryItem(name: "l", value: "schinese")
-        ]
-
-        guard let url = components.url else {
-            throw APIError.invalidURL
         }
 
-        let data = try await Network.getData(url)
-
-        guard
-            let root = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-            let appRoot = root[String(appID)] as? [String: Any],
-            appRoot["success"] as? Bool == true,
-            let details = appRoot["data"] as? [String: Any],
-            let name = details["name"] as? String
-        else {
-            return nil
+        guard !candidates.isEmpty else {
+            throw NSError(
+                domain: "SteamAPI",
+                code: -3,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "没有解析到 Steam 商品，请稍后重试"
+                ]
+            )
         }
 
-        let groups = details["package_groups"] as? [[String: Any]] ?? []
+        var games: [SteamGame] = []
 
-        let isLimitedFree = groups.contains { group in
-            let text = (group["option_text"] as? String ?? "")
-                .replacingOccurrences(of: "&nbsp;", with: " ")
-                .lowercased()
+        for candidate in candidates {
+            do {
+                guard let detailURL = makeURL(
+                    "https://store.steampowered.com/api/appdetails",
+                    queryItems: [
+                        URLQueryItem(
+                            name: "appids",
+                            value: "\(candidate.id)"
+                        ),
+                        URLQueryItem(
+                            name: "cc",
+                            value: countryCode
+                        ),
+                        URLQueryItem(
+                            name: "l",
+                            value: language
+                        )
+                    ]
+                ) else {
+                    continue
+                }
 
-            let mentionsPromotion =
-                text.contains("limited") ||
-                text.contains("限时") ||
-                text.contains("限時") ||
-                text.contains("free to keep") ||
-                text.contains("免费领取") ||
-                text.contains("免費領取")
+                let detailJSON = try await requestJSON(detailURL)
+                let appRoot = dictionary(
+                    dictionary(detailJSON)["\(candidate.id)"]
+                )
 
-            let price = group["price_in_cents_with_discount"] as? Int
+                guard appRoot["success"] as? Bool == true else {
+                    continue
+                }
 
-            return mentionsPromotion && (price == nil || price == 0)
-        }
+                let data = dictionary(appRoot["data"])
+                let name = string(data["name"])
+                let appType = string(data["type"]).lowercased()
+                let isDLC = appType == "dlc"
 
-        guard isLimitedFree else { return nil }
+                guard appType == "game" || isDLC else {
+                    continue
+                }
 
-        let type = (details["type"] as? String ?? "game").lowercased()
-        let kind: SteamItemKind = type == "dlc" ? .dlc : .game
+                let packageGroups =
+                    data["package_groups"] as? [[String: Any]] ?? []
 
-        return SteamGame(
-            appID: appID,
-            name: name,
-            kind: kind
-        )
-    }
-}
+                var isLimitedFree = false
+                var originalPriceCents: Int?
 
-// MARK: - Epic API
+                for group in packageGroups {
+                    let subs = group["subs"] as? [[String: Any]] ?? []
 
-enum EpicAPI {
-    static func fetchFreeGames() async throws -> [EpicGame] {
-        let address =
-            "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=zh-CN&country=SG&allowCountries=SG"
+                    for sub in subs {
+                        let optionText =
+                            string(sub["option_text"]).lowercased()
 
-        guard let url = URL(string: address) else {
-            throw APIError.invalidURL
-        }
+                        let discountPrice =
+                            (sub["price_in_cents_with_discount"] as? Int)
+                            ?? Int(
+                                string(
+                                    sub["price_in_cents_with_discount"]
+                                )
+                            )
 
-        let data = try await Network.getData(url)
+                        let originalCents =
+                            (sub["price_in_cents_without_discount"] as? Int)
+                            ?? Int(
+                                string(
+                                    sub["price_in_cents_without_discount"]
+                                )
+                            )
 
-        guard
-            let root = try JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-            let dataObject = root["data"] as? [String: Any],
-            let catalog = dataObject["Catalog"] as? [String: Any],
-            let searchStore = catalog["searchStore"] as? [String: Any]
-        else {
-            throw APIError.noResults("Epic 返回的数据格式暂时无法识别。")
-        }
+                        let matches =
+                            optionText.contains(
+                                "limited free promotional package"
+                            )
+                            || optionText.contains("limited-time free")
+                            || optionText.contains("limited time free")
+                            || optionText.contains("限时免费")
+                            || optionText.contains("限时免费促销")
 
-        let products = searchStore["elements"] as? [[String: Any]] ?? []
-        let now = Date()
-        var results: [EpicGame] = []
-        var seen = Set<String>()
+                        if matches && discountPrice == 0 {
+                            isLimitedFree = true
+                            originalPriceCents = originalCents
+                            break
+                        }
+                    }
 
-        for product in products {
-            guard
-                let id = product["id"] as? String,
-                let title = product["title"] as? String,
-                let price = product["price"] as? [String: Any],
-                let totalPrice = price["totalPrice"] as? [String: Any],
-                let discountPrice = totalPrice["discountPrice"] as? Int,
-                discountPrice == 0
-            else {
+                    if isLimitedFree { break }
+                }
+
+                guard isLimitedFree else { continue }
+
+                let imageURL = string(data["header_image"])
+                let priceText: String
+
+                if let cents = originalPriceCents, cents > 0 {
+                    priceText = formatSGD(cents)
+                } else {
+                    priceText = "限时免费"
+                }
+
+                games.append(
+                    SteamGame(
+                        id: candidate.id,
+                        name: name.isEmpty ? candidate.name : name,
+                        imageURL: imageURL,
+                        originalPrice: priceText,
+                        kind: isDLC ? .dlc : .game
+                    )
+                )
+            } catch {
                 continue
             }
-
-            let promotions = product["promotions"] as? [String: Any]
-            let offerGroups =
-                promotions?["promotionalOffers"] as? [[String: Any]] ?? []
-
-            let offers = offerGroups.flatMap {
-                $0["promotionalOffers"] as? [[String: Any]] ?? []
-            }
-
-            let activeOffer = offers.first { offer in
-                let start = AppHelpers.parseDate(
-                    offer["startDate"] as? String
-                )
-                let end = AppHelpers.parseDate(
-                    offer["endDate"] as? String
-                )
-
-                let hasStarted = start == nil || start! <= now
-                let hasNotEnded = end == nil || end! > now
-
-                return hasStarted && hasNotEnded
-            }
-
-            guard let activeOffer else { continue }
-            guard !seen.contains(id) else { continue }
-            seen.insert(id)
-
-            let slug = findSlug(product)
-            let isBundle = (product["offerType"] as? Int) == 2
-                || (product["offerType"] as? String) == "BUNDLE"
-
-            let productURL: URL
-
-            if !slug.isEmpty {
-                let safeSlug = AppHelpers.safePath(slug)
-                let path = isBundle ? "bundles" : "p"
-
-                productURL = URL(
-                    string: "https://store.epicgames.com/zh-CN/\(path)/\(safeSlug)"
-                )!
-            } else {
-                var components = URLComponents(
-                    string: "https://store.epicgames.com/zh-CN/browse"
-                )!
-                components.queryItems = [
-                    URLQueryItem(name: "query", value: title)
-                ]
-                productURL = components.url!
-            }
-
-            let description = product["description"] as? String ?? ""
-            let images = product["keyImages"] as? [[String: Any]] ?? []
-
-            let imageString = images.first {
-                let type = ($0["type"] as? String ?? "").lowercased()
-                return type.contains("offer")
-                    || type.contains("thumbnail")
-                    || type.contains("diesel")
-            }?["url"] as? String
-
-            let imageURL = imageString.flatMap { URL(string: $0) }
-            let endDate = AppHelpers.parseDate(
-                activeOffer["endDate"] as? String
-            )
-
-            results.append(
-                EpicGame(
-                    id: id,
-                    title: title,
-                    description: description,
-                    imageURL: imageURL,
-                    productURL: productURL,
-                    endDate: endDate
-                )
-            )
         }
 
-        return results.sorted {
-            if let first = $0.endDate, let second = $1.endDate {
-                return first < second
+        return games.sorted {
+            if $0.isDLC != $1.isDLC {
+                return !$0.isDLC
             }
-            if $0.endDate != nil { return true }
-            if $1.endDate != nil { return false }
 
-            return $0.title.localizedCaseInsensitiveCompare($1.title)
+            return $0.name.localizedCompare($1.name)
                 == .orderedAscending
         }
     }
 
-    private static func findSlug(_ product: [String: Any]) -> String {
-        let catalogNS = product["catalogNs"] as? [String: Any] ?? [:]
-        let mappings = catalogNS["mappings"] as? [[String: Any]] ?? []
+    private static func extractName(
+        around location: Int,
+        html: String
+    ) -> String {
+        let start = max(0, location - 500)
+        let end = min(html.count, location + 1000)
 
-        for preferredType in ["producthome", "product"] {
-            if let mapping = mappings.first(where: {
-                let pageType = ($0["pageType"] as? String ?? "").lowercased()
-                let pageSlug = $0["pageSlug"] as? String ?? ""
+        let lowerIndex = html.index(
+            html.startIndex,
+            offsetBy: start
+        )
 
-                return pageType == preferredType && !pageSlug.isEmpty
-            }) {
-                return mapping["pageSlug"] as? String ?? ""
-            }
+        let upperIndex = html.index(
+            html.startIndex,
+            offsetBy: end
+        )
+
+        let fragment = String(html[lowerIndex..<upperIndex])
+
+        guard let regex = try? NSRegularExpression(
+            pattern: #"class="title">([^<]+)</span>"#
+        ) else {
+            return ""
         }
 
-        for key in ["productSlug", "urlSlug"] {
-            if let value = product[key] as? String, !value.isEmpty {
-                return value
-            }
+        let nsFragment = fragment as NSString
+        let range = NSRange(
+            location: 0,
+            length: nsFragment.length
+        )
+
+        guard let match = regex.firstMatch(
+            in: fragment,
+            range: range
+        ),
+              match.numberOfRanges > 1 else {
+            return ""
         }
 
-        return ""
+        return nsFragment.substring(with: match.range(at: 1))
+    }
+
+    private static func formatSGD(_ cents: Int) -> String {
+        (Double(cents) / 100).formatted(
+            .currency(code: "SGD")
+                .locale(Locale(identifier: "en_SG"))
+        )
     }
 }
 
-// MARK: - Observable stores
+// MARK: - Epic Games Store API
+
+enum EpicAPI {
+    private static func string(_ value: Any?) -> String {
+        value as? String ?? ""
+    }
+
+    private static func dictionary(_ value: Any?) -> [String: Any] {
+        value as? [String: Any] ?? [:]
+    }
+
+    static func fetchFreeGames() async throws -> [EpicGame] {
+        guard let url = URL(
+            string: "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=zh-CN&country=SG&allowCountries=SG"
+        ) else {
+            throw URLError(.badURL)
+        }
+
+        let root = dictionary(try await StoreHTTP.json(from: url))
+        let data = dictionary(root["data"])
+        let catalog = dictionary(data["Catalog"])
+        let elements = catalog["searchStore"] as? [String: Any]
+        let products = elements?["elements"] as? [[String: Any]] ?? []
+
+        var result: [EpicGame] = []
+        var seen = Set<String>()
+
+        for product in products {
+            let id = string(product["id"])
+            let title = string(product["title"])
+
+            guard !id.isEmpty,
+                  !title.isEmpty,
+                  !seen.contains(id) else {
+                continue
+            }
+
+            let price = dictionary(product["price"])
+            let totalPrice = dictionary(price["totalPrice"])
+            let discountPrice =
+                (totalPrice["discountPrice"] as? Int) ?? -1
+
+            guard discountPrice == 0 else { continue }
+
+            let promotions = dictionary(product["promotions"])
+            let activePromotions =
+                promotions["promotionalOffers"] as? [[String: Any]] ?? []
+
+            var endDate: Date?
+
+            for promotionGroup in activePromotions {
+                let offers =
+                    promotionGroup["promotionalOffers"] as? [[String: Any]]
+                    ?? []
+
+                for offer in offers {
+                    let start = parseDate(string(offer["startDate"]))
+                    let end = parseDate(string(offer["endDate"]))
+
+                    if let end,
+                       end > Date(),
+                       start == nil || (start ?? .distantPast) <= Date() {
+                        endDate = end
+                        break
+                    }
+                }
+
+                if endDate != nil { break }
+            }
+
+            // 只显示当前正在进行且可免费领取的促销。
+            guard let validEndDate = endDate else { continue }
+
+            let keyImages =
+                product["keyImages"] as? [[String: Any]] ?? []
+
+            let preferredTypes = [
+                "OfferImageWide",
+                "DieselStoreFrontWide",
+                "OfferImageTall",
+                "Thumbnail",
+                "ProductLogo"
+            ]
+
+            let imageURL = preferredTypes.lazy.compactMap { wanted in
+                keyImages.first(where: {
+                    string($0["type"]) == wanted
+                }).map {
+                    string($0["url"])
+                }
+            }.first(where: {
+                $0.hasPrefix("https://")
+            }) ?? ""
+
+            // 修复点：不再直接把任意 pageSlug 拼成固定商品链接。
+            let storeURL = makeStoreURL(product)
+
+            let originalPrice: String
+
+            if let original = totalPrice["originalPrice"] as? Int,
+               original > 0 {
+                let currencyCode = string(totalPrice["currencyCode"])
+                originalPrice = formatPrice(
+                    original,
+                    currencyCode: currencyCode.isEmpty ? "SGD" : currencyCode
+                )
+            } else {
+                originalPrice = "免费"
+            }
+
+            let description = string(product["description"])
+
+            result.append(
+                EpicGame(
+                    id: id,
+                    name: title,
+                    description: description,
+                    imageURL: imageURL,
+                    originalPrice: originalPrice,
+                    endDate: validEndDate,
+                    storeURL: storeURL
+                )
+            )
+
+            seen.insert(id)
+        }
+
+        return result.sorted {
+            ($0.endDate ?? .distantFuture)
+                < ($1.endDate ?? .distantFuture)
+        }
+    }
+
+    // MARK: Epic 商品链接修复
+
+    private static func makeStoreURL(
+        _ product: [String: Any]
+    ) -> URL {
+        let fallbackURL = URL(
+            string: "https://store.epicgames.com/zh-CN/free-games"
+        )!
+
+        let catalogNs = dictionary(product["catalogNs"])
+        let mappings = catalogNs["mappings"] as? [[String: Any]] ?? []
+        let offerMappings =
+            product["offerMappings"] as? [[String: Any]] ?? []
+
+        // 优先使用明确提供的商品页面映射。
+        let mappingCandidates = offerMappings + mappings
+
+        var rawSlug = ""
+
+        for mapping in mappingCandidates {
+            let pageSlug = string(mapping["pageSlug"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !pageSlug.isEmpty else { continue }
+
+            let pageType = string(mapping["pageType"]).lowercased()
+
+            if pageType.isEmpty
+                || pageType == "product"
+                || pageType == "producthome" {
+                rawSlug = pageSlug
+                break
+            }
+        }
+
+        // 映射没有可用值时，再使用商品自身的 slug 字段。
+        if rawSlug.isEmpty {
+            rawSlug = string(product["productSlug"])
+        }
+
+        if rawSlug.isEmpty {
+            rawSlug = string(product["urlSlug"])
+        }
+
+        guard !rawSlug.isEmpty else {
+            return fallbackURL
+        }
+
+        // 如果字段带完整 URL，尝试提取其中的商品路径。
+        if let suppliedURL = URL(string: rawSlug),
+           let scheme = suppliedURL.scheme?.lowercased(),
+           scheme == "https" || scheme == "http" {
+            let host = suppliedURL.host?.lowercased() ?? ""
+
+            if host == "store.epicgames.com"
+                || host.hasSuffix(".epicgames.com") {
+                return suppliedURL
+            }
+
+            return fallbackURL
+        }
+
+        // 去除开头和结尾的斜杠，防止出现重复路径。
+        let cleanedSlug = rawSlug
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+        guard !cleanedSlug.isEmpty else {
+            return fallbackURL
+        }
+
+        let segments = cleanedSlug.split(separator: "/")
+
+        // 若 API 返回的是 p/xxx 或 bundles/xxx 路径，
+        // 保留原路径，避免重复添加 /p/。
+        if segments.count >= 2 {
+            let first = String(segments[0]).lowercased()
+
+            if first == "p" || first == "bundles" {
+                let path = segments
+                    .map(String.init)
+                    .joined(separator: "/")
+
+                if let url = URL(
+                    string: "https://store.epicgames.com/zh-CN/\(path)"
+                ) {
+                    return url
+                }
+            }
+        }
+
+        // 根据接口提供的商品类型决定默认路径。
+        let offerType = string(product["offerType"]).uppercased()
+        let path = offerType == "BUNDLE" ? "bundles" : "p"
+
+        guard let encodedSlug = cleanedSlug.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed
+        ),
+              let url = URL(
+                string: "https://store.epicgames.com/zh-CN/\(path)/\(encodedSlug)"
+              ) else {
+            return fallbackURL
+        }
+
+        return url
+    }
+
+    private static func parseDate(_ value: String) -> Date? {
+        guard !value.isEmpty else { return nil }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [
+            .withInternetDateTime,
+            .withFractionalSeconds
+        ]
+
+        if let date = formatter.date(from: value) {
+            return date
+        }
+
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func formatPrice(
+        _ cents: Int,
+        currencyCode: String
+    ) -> String {
+        let locale = Locale(
+            identifier: currencyCode == "SGD" ? "en_SG" : "en_US"
+        )
+
+        return (Double(cents) / 100).formatted(
+            .currency(code: currencyCode).locale(locale)
+        )
+    }
+}
+
+ // MARK: - Steam 数据管理（保留原有逻辑）
 
 @MainActor
 final class SteamStore: ObservableObject {
@@ -416,25 +748,21 @@ final class SteamStore: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    func refresh() async {
+    func loadGames() async {
         guard !isLoading else { return }
-
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
 
         do {
             games = try await SteamAPI.fetchFreeGames()
-
-            if games.isEmpty {
-                errorMessage =
-                    "暂时没有检测到限时免费商品。Steam 的促销数据可能有延迟。"
-            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 }
+
+// MARK: - Epic 数据管理
 
 @MainActor
 final class EpicStore: ObservableObject {
@@ -442,927 +770,983 @@ final class EpicStore: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    func refresh() async {
+    func loadGames() async {
         guard !isLoading else { return }
-
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
 
         do {
             games = try await EpicAPI.fetchFreeGames()
-
-            if games.isEmpty {
-                errorMessage =
-                    "暂时没有检测到当前限免，或者 Epic 的数据格式发生了变化。"
-            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 }
 
-// MARK: - Main Tabs
+// MARK: - 点击动效
+
+private struct SteamCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .offset(y: configuration.isPressed ? 1.5 : 0)
+            .shadow(
+                color: .black.opacity(configuration.isPressed ? 0.08 : 0.24),
+                radius: configuration.isPressed ? 4 : 12,
+                x: 0,
+                y: configuration.isPressed ? 2 : 7
+            )
+            .animation(
+                .spring(response: 0.28, dampingFraction: 0.68),
+                value: configuration.isPressed
+            )
+    }
+}
+
+// MARK: - 平台入口
 
 struct ContentView: View {
+    @State private var selectedPlatform = 0
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedPlatform) {
             SteamHomeView()
                 .tabItem {
                     Image(systemName: "gamecontroller.fill")
                     Text("Steam")
                 }
+                .tag(0)
 
             EpicHomeView()
                 .tabItem {
-                    Image(systemName: "gift.fill")
+                    Image(systemName: "e.square.fill")
                     Text("Epic 限免")
                 }
-
-            MyAccountsView()
-                .tabItem {
-                    Image(systemName: "person.crop.circle.fill")
-                    Text("我的")
-                }
+                .tag(1)
         }
-        .tint(AppStyle.blue)
+        .tint(selectedPlatform == 0 ? SteamStyle.cyan : .white)
         .preferredColorScheme(.dark)
     }
 }
-// MARK: - Steam Home
 
-struct SteamHomeView: View {
+// MARK: - Steam 首页
+
+private struct SteamHomeView: View {
     @StateObject private var store = SteamStore()
+    private let horizontalPadding: CGFloat = 22
+
+    private var games: [SteamGame] {
+        store.games.filter { !$0.isDLC }
+    }
+
+    private var dlcs: [SteamGame] {
+        store.games.filter { $0.isDLC }
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
-                AppStyle.background.ignoresSafeArea()
+                SteamStyle.background.ignoresSafeArea()
 
-                if store.isLoading && store.games.isEmpty {
-                    ProgressView("正在获取 Steam 限免…")
-                        .tint(.white)
-                } else if store.games.isEmpty,
-                          let error = store.errorMessage {
-                    ErrorPanel(
-                        title: "暂时无法显示限免",
-                        message: error
-                    ) {
-                        Task { await store.refresh() }
-                    }
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 14) {
-                            HStack(spacing: 12) {
-                                Image(systemName: "gamecontroller.fill")
-                                    .font(.system(size: 28))
-                                    .foregroundStyle(AppStyle.blue)
-                                    .frame(width: 56, height: 56)
-                                    .background(
-                                        AppStyle.blue.opacity(0.15),
-                                        in: RoundedRectangle(cornerRadius: 15)
-                                    )
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 24) {
+                        header
+                        summaryCard
 
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("Steam 限时免费")
-                                        .font(.title3.bold())
-                                        .foregroundStyle(.white)
-
-                                    Text("发现正在进行的免费活动")
-                                        .font(.caption)
-                                        .foregroundStyle(AppStyle.secondary)
-                                }
-
-                                Spacer()
-                            }
-                            .padding(16)
-                            .background(
-                                AppStyle.card,
-                                in: RoundedRectangle(cornerRadius: 18)
-                            )
-
-                            if let error = store.errorMessage {
-                                InlineNotice(message: error)
+                        if store.isLoading && store.games.isEmpty {
+                            loadingView
+                        } else if let error = store.errorMessage,
+                                  store.games.isEmpty {
+                            errorView(error)
+                        } else if store.games.isEmpty {
+                            emptyView
+                        } else {
+                            if !games.isEmpty {
+                                gameSection(
+                                    title: "限时免费游戏",
+                                    subtitle: "限时领取，错过可能恢复原价",
+                                    items: games
+                                )
                             }
 
-                            ForEach(store.games) { game in
-                                SteamGameCard(game: game)
+                            if !dlcs.isEmpty {
+                                gameSection(
+                                    title: "免费 DLC 内容",
+                                    subtitle: "扩展内容与附加组件",
+                                    items: dlcs
+                                )
                             }
 
-                            Text("活动可能随时结束，请以 Steam 官方商店页面为准。")
-                                .font(.caption)
-                                .foregroundStyle(AppStyle.secondary)
-                                .multilineTextAlignment(.center)
-                                .padding(.vertical, 12)
+                            footer
                         }
-                        .padding(16)
                     }
-                    .refreshable {
-                        await store.refresh()
-                    }
+                    .frame(maxWidth: 560)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.top, 18)
+                    .padding(.bottom, 34)
+                }
+                .refreshable {
+                    await store.loadGames()
                 }
             }
-            .navigationTitle("Steam 限免")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await store.refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(store.isLoading)
-                }
-            }
-            .task {
-                if store.games.isEmpty && !store.isLoading {
-                    await store.refresh()
-                }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .task {
+            if store.games.isEmpty {
+                await store.loadGames()
             }
         }
     }
-}
 
-// MARK: - Steam Game Card
+    private var header: some View {
+        HStack(spacing: 13) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                SteamStyle.blue,
+                                Color(red: 0.16, green: 0.37, blue: 0.75)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 54, height: 54)
 
-struct SteamGameCard: View {
-    let game: SteamGame
+                Image(systemName: "gift.fill")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(.white)
+            }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 12) {
-                Image(
-                    systemName: game.kind == .dlc
-                        ? "puzzlepiece.extension.fill"
-                        : "gamecontroller.fill"
-                )
-                .font(.system(size: 24))
-                .foregroundStyle(AppStyle.blue)
-                .frame(width: 50, height: 50)
-                .background(
-                    AppStyle.cardLight,
-                    in: RoundedRectangle(cornerRadius: 13)
-                )
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Steam Games")
+                    .font(.system(size: 23, weight: .bold))
+                    .foregroundStyle(.white)
 
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(game.name)
-                        .font(.headline)
+                Text("发现 Steam 限时免费好游戏")
+                    .font(.system(size: 12))
+                    .foregroundStyle(SteamStyle.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                Task {
+                    await store.loadGames()
+                }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(SteamStyle.cyan)
+                    .frame(width: 42, height: 42)
+                    .background(SteamStyle.cardLight, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("刷新游戏")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var summaryCard: some View {
+        HStack(spacing: 0) {
+            summaryItem(
+                icon: "gamecontroller.fill",
+                title: "游戏本体",
+                value: "\(games.count)",
+                color: SteamStyle.blue
+            )
+
+            Rectangle()
+                .fill(SteamStyle.border)
+                .frame(width: 1, height: 42)
+
+            summaryItem(
+                icon: "square.stack.3d.up.fill",
+                title: "DLC 内容",
+                value: "\(dlcs.count)",
+                color: SteamStyle.cyan
+            )
+
+            Rectangle()
+                .fill(SteamStyle.border)
+                .frame(width: 1, height: 42)
+
+            summaryItem(
+                icon: "tag.fill",
+                title: "当前价格",
+                value: "免费",
+                color: SteamStyle.green
+            )
+        }
+        .padding(.vertical, 19)
+        .padding(.horizontal, 8)
+        .background(
+            LinearGradient(
+                colors: [SteamStyle.cardLight, SteamStyle.card],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 20)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(SteamStyle.border, lineWidth: 1)
+        }
+    }
+
+    private func summaryItem(
+        icon: String,
+        title: String,
+        value: String,
+        color: Color
+    ) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(color)
+
+            Text(value)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func gameSection(
+        title: String,
+        subtitle: String,
+        items: [SteamGame]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(SteamStyle.blue)
+                    .frame(width: 4, height: 30)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 19, weight: .bold))
                         .foregroundStyle(.white)
-                        .fixedSize(horizontal: false, vertical: true)
 
-                    HStack(spacing: 8) {
-                        Text(game.kind.title)
-                            .font(.caption2.bold())
-                            .foregroundStyle(AppStyle.blue)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(
-                                AppStyle.blue.opacity(0.15),
-                                in: Capsule()
-                            )
-
-                        Text("限时免费")
-                            .font(.caption2.bold())
-                            .foregroundStyle(AppStyle.green)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(
-                                AppStyle.green.opacity(0.13),
-                                in: Capsule()
-                            )
-                    }
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(SteamStyle.secondary)
                 }
 
                 Spacer(minLength: 0)
+
+                Text("\(items.count)")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(SteamStyle.cyan)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        SteamStyle.blue.opacity(0.15),
+                        in: Capsule()
+                    )
             }
+
+            LazyVStack(spacing: 15) {
+                ForEach(items) { game in
+                    GameCard(game: game)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 15) {
+            ProgressView()
+                .tint(SteamStyle.cyan)
+                .scaleEffect(1.2)
+
+            Text("正在寻找限时免费游戏…")
+                .font(.system(size: 14))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 65)
+    }
+
+    private func errorView(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 34))
+                .foregroundStyle(SteamStyle.cyan)
+
+            Text("暂时无法获取游戏")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                Task {
+                    await store.loadGames()
+                }
+            } label: {
+                Label("重新加载", systemImage: "arrow.clockwise")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 12)
+                    .background(SteamStyle.blue, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .background(
+            SteamStyle.card,
+            in: RoundedRectangle(cornerRadius: 20)
+        )
+    }
+
+    private var emptyView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "gift")
+                .font(.system(size: 36))
+                .foregroundStyle(SteamStyle.cyan)
+
+            Text("暂时没有找到限时免费内容")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+
+            Text("可以下拉刷新，稍后再试")
+                .font(.system(size: 12))
+                .foregroundStyle(SteamStyle.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 60)
+    }
+
+    private var footer: some View {
+        Text("数据来自 Steam 商店 · 限免状态可能随时变化")
+            .font(.system(size: 10))
+            .foregroundStyle(.white.opacity(0.35))
+            .frame(maxWidth: .infinity)
+            .multilineTextAlignment(.center)
+            .padding(.top, 2)
+    }
+}
+
+// MARK: - Steam 卡片
+
+private struct GameCard: View {
+    let game: SteamGame
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                AsyncImage(url: URL(string: game.imageURL)) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable()
+                            .aspectRatio(contentMode: .fill)
+
+                    case .failure:
+                        imagePlaceholder
+
+                    case .empty:
+                        imagePlaceholder
+                            .overlay {
+                                ProgressView()
+                                    .tint(SteamStyle.cyan)
+                                    .scaleEffect(0.8)
+                            }
+
+                    @unknown default:
+                        imagePlaceholder
+                    }
+                }
+                .frame(width: 118, height: 74)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(game.name)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(
+                            maxWidth: .infinity,
+                            alignment: .leading
+                        )
+
+                    HStack(spacing: 5) {
+                        Image(
+                            systemName: game.isDLC
+                                ? "square.stack.3d.up.fill"
+                                : "gamecontroller.fill"
+                        )
+
+                        Text(game.kind.rawValue)
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(
+                        game.isDLC ? SteamStyle.cyan : SteamStyle.blue
+                    )
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        (game.isDLC
+                            ? SteamStyle.cyan
+                            : SteamStyle.blue).opacity(0.12),
+                        in: Capsule()
+                    )
+
+                    Text("原价参考：\(game.originalPrice)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(SteamStyle.secondary)
+                        .lineLimit(1)
+                }
+
+                VStack(spacing: 4) {
+                    Image(systemName: "gift.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(SteamStyle.green)
+
+                    Text("免费")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(SteamStyle.green)
+                }
+                .frame(width: 34)
+            }
+
+            Divider()
+                .overlay(SteamStyle.border)
+                .padding(.vertical, 11)
 
             Button {
                 UIApplication.shared.open(game.storeURL)
             } label: {
-                Label("前往 Steam 手动领取", systemImage: "arrow.up.right.square")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(
-                        AppStyle.blue,
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(15)
-        .background(
-            AppStyle.card,
-            in: RoundedRectangle(cornerRadius: 18)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(AppStyle.border)
-        }
-    }
-}
+                HStack(spacing: 8) {
+                    Image(systemName: "gift.fill")
+                        .font(.system(size: 12, weight: .bold))
 
-// MARK: - Epic Home
+                    Text("确认领取")
+                        .font(.system(size: 13, weight: .bold))
 
-struct EpicHomeView: View {
-    @StateObject private var store = EpicStore()
+                    Spacer()
 
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                AppStyle.background.ignoresSafeArea()
+                    Text("前往 Steam")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.75))
 
-                if store.isLoading && store.games.isEmpty {
-                    ProgressView("正在获取 Epic 限免…")
-                        .tint(.white)
-                } else if store.games.isEmpty,
-                          let error = store.errorMessage {
-                    ErrorPanel(
-                        title: "暂时无法显示限免",
-                        message: error
-                    ) {
-                        Task { await store.refresh() }
-                    }
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 14) {
-                            HStack(spacing: 12) {
-                                Image(systemName: "gift.fill")
-                                    .font(.system(size: 28))
-                                    .foregroundStyle(.purple)
-                                    .frame(width: 56, height: 56)
-                                    .background(
-                                        Color.purple.opacity(0.16),
-                                        in: RoundedRectangle(cornerRadius: 15)
-                                    )
-
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("Epic Games 限免")
-                                        .font(.title3.bold())
-                                        .foregroundStyle(.white)
-
-                                    Text("查看当前促销中的免费商品")
-                                        .font(.caption)
-                                        .foregroundStyle(AppStyle.secondary)
-                                }
-
-                                Spacer()
-                            }
-                            .padding(16)
-                            .background(
-                                AppStyle.card,
-                                in: RoundedRectangle(cornerRadius: 18)
-                            )
-
-                            if let error = store.errorMessage {
-                                InlineNotice(message: error)
-                            }
-
-                            ForEach(store.games) { game in
-                                EpicGameCard(game: game)
-                            }
-
-                            Text("请在 Epic 官方页面确认价格和活动结束时间。")
-                                .font(.caption)
-                                .foregroundStyle(AppStyle.secondary)
-                                .multilineTextAlignment(.center)
-                                .padding(.vertical, 12)
-                        }
-                        .padding(16)
-                    }
-                    .refreshable {
-                        await store.refresh()
-                    }
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 11, weight: .bold))
                 }
-            }
-            .navigationTitle("Epic 限免")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await store.refresh() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(store.isLoading)
-                }
-            }
-            .task {
-                if store.games.isEmpty && !store.isLoading {
-                    await store.refresh()
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Epic Game Card
-
-struct EpicGameCard: View {
-    let game: EpicGame
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let imageURL = game.imageURL {
-                AsyncImage(url: imageURL) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } else if phase.error != nil {
-                        imagePlaceholder
-                    } else {
-                        ZStack {
-                            AppStyle.cardLight
-                            ProgressView().tint(.white)
-                        }
-                    }
-                }
-                .frame(height: 170)
-                .frame(maxWidth: .infinity)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 13))
-            } else {
-                imagePlaceholder
-                    .frame(height: 120)
-            }
-
-            Text(game.title)
-                .font(.headline)
                 .foregroundStyle(.white)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if !game.description.isEmpty {
-                Text(game.description)
-                    .font(.caption)
-                    .foregroundStyle(AppStyle.secondary)
-                    .lineLimit(3)
-            }
-
-            if let endDate = game.endDate {
-                Label(
-                    "结束时间：\(endDate.formatted(date: .abbreviated, time: .shortened))",
-                    systemImage: "clock"
+                .padding(.horizontal, 13)
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.12, green: 0.48, blue: 0.82),
+                            Color(red: 0.12, green: 0.35, blue: 0.66)
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 10)
                 )
-                .font(.caption)
-                .foregroundStyle(.orange)
-            } else {
-                Label(
-                    "具体结束时间以商店页面为准",
-                    systemImage: "clock"
-                )
-                .font(.caption)
-                .foregroundStyle(AppStyle.secondary)
             }
-
-            Button {
-                UIApplication.shared.open(game.productURL)
-            } label: {
-                Label("打开 Epic 商城领取", systemImage: "arrow.up.right.square")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(
-                        AppStyle.blue,
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
-            }
-            .buttonStyle(.plain)
+            .buttonStyle(SteamCardButtonStyle())
         }
-        .padding(14)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            AppStyle.card,
-            in: RoundedRectangle(cornerRadius: 18)
+            LinearGradient(
+                colors: [SteamStyle.cardLight, SteamStyle.card],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 16)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(AppStyle.border)
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(SteamStyle.border, lineWidth: 1)
         }
     }
 
     private var imagePlaceholder: some View {
         ZStack {
-            AppStyle.cardLight
+            LinearGradient(
+                colors: [SteamStyle.cardLight, SteamStyle.background],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
             Image(systemName: "gamecontroller.fill")
-                .font(.system(size: 34))
-                .foregroundStyle(AppStyle.secondary)
+                .font(.system(size: 25))
+                .foregroundStyle(SteamStyle.blue.opacity(0.8))
         }
-        .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 13))
+        .frame(width: 118, height: 74)
     }
 }
 
-// MARK: - My Accounts
+// MARK: - Epic 限免页面
 
-struct MyAccountsView: View {
-    @AppStorage("steam_accounts_json") private var accountsJSON = "[]"
-    @AppStorage("selected_steam_id") private var selectedSteamID = ""
-
-    @State private var showingAddAccount = false
-    @State private var accountToDelete: SteamAccount?
-    @State private var showingDeleteAlert = false
-
-    private var accounts: [SteamAccount] {
-        guard
-            let data = accountsJSON.data(using: .utf8),
-            let decoded = try? JSONDecoder().decode(
-                [SteamAccount].self,
-                from: data
-            )
-        else {
-            return []
-        }
-
-        return decoded
-    }
-
-    private var selectedAccount: SteamAccount? {
-        accounts.first { $0.steamID64 == selectedSteamID }
-    }
+private struct EpicHomeView: View {
+    @StateObject private var store = EpicStore()
 
     var body: some View {
         NavigationStack {
             ZStack {
-                AppStyle.background.ignoresSafeArea()
+                EpicStyle.background.ignoresSafeArea()
 
-                ScrollView {
-                    VStack(spacing: 20) {
-                        profileHeader
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        header
+                        heroPanel
 
-                        VStack(alignment: .leading, spacing: 14) {
-                            HStack {
-                                Text("Steam 账号列表")
-                                    .font(.headline)
-                                    .foregroundStyle(.white)
-
-                                Spacer()
-
-                                Text("\(accounts.count) 个")
-                                    .font(.caption)
-                                    .foregroundStyle(AppStyle.secondary)
-                            }
-
-                            if accounts.isEmpty {
-                                VStack(spacing: 10) {
-                                    Image(systemName: "person.badge.plus")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(AppStyle.secondary)
-
-                                    Text("还没有添加账号")
-                                        .font(.subheadline.bold())
+                        if store.isLoading && store.games.isEmpty {
+                            loadingView
+                        } else if let error = store.errorMessage,
+                                  store.games.isEmpty {
+                            errorView(error)
+                        } else if store.games.isEmpty {
+                            emptyView
+                        } else {
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text("本周免费游戏")
+                                        .font(
+                                            .system(
+                                                size: 22,
+                                                weight: .bold
+                                            )
+                                        )
                                         .foregroundStyle(.white)
 
-                                    Text("添加资料后，可在这里切换账号。")
-                                        .font(.caption)
-                                        .foregroundStyle(AppStyle.secondary)
+                                    Spacer()
+
+                                    Text("\(store.games.count) 款")
+                                        .font(
+                                            .system(
+                                                size: 12,
+                                                weight: .medium
+                                            )
+                                        )
+                                        .foregroundStyle(
+                                            EpicStyle.secondary
+                                        )
                                 }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 20)
-                            }
 
-                            ForEach(accounts) { account in
-                                accountRow(account)
+                                ForEach(store.games) { game in
+                                    EpicGameCard(game: game)
+                                }
                             }
-
-                            Button {
-                                showingAddAccount = true
-                            } label: {
-                                Label("添加 Steam 账号", systemImage: "plus.circle.fill")
-                                    .font(.subheadline.bold())
-                                    .foregroundStyle(.white)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(
-                                        AppStyle.blue,
-                                        in: RoundedRectangle(cornerRadius: 12)
-                                    )
-                            }
-                            .buttonStyle(.plain)
                         }
-                        .padding(16)
-                        .background(
-                            AppStyle.card,
-                            in: RoundedRectangle(cornerRadius: 20)
+
+                        Text(
+                            "数据来自 Epic Games Store · 实际价格、地区资格及截止时间以商店页面为准"
                         )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 20)
-                                .stroke(AppStyle.border)
-                        }
-
-                        VStack(alignment: .leading, spacing: 9) {
-                            Label("使用说明", systemImage: "info.circle.fill")
-                                .font(.subheadline.bold())
-                                .foregroundStyle(.white)
-
-                            Text("此页面保存的是你手动填写的账号资料。切换账号不会自动改变 Safari 或 Steam 客户端的登录状态。")
-                                .font(.caption)
-                                .foregroundStyle(AppStyle.secondary)
-
-                            Text("不要填写 Steam 密码、Steam Guard 验证码或 Cookie。")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
-                        .background(
-                            AppStyle.card,
-                            in: RoundedRectangle(cornerRadius: 18)
+                        .font(.system(size: 10))
+                        .foregroundStyle(EpicStyle.secondary)
+                        .frame(
+                            maxWidth: .infinity,
+                            alignment: .leading
                         )
+                        .padding(.top, 4)
                     }
-                    .frame(maxWidth: 560)
+                    .frame(maxWidth: 620)
                     .frame(maxWidth: .infinity)
-                    .padding(16)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 18)
+                    .padding(.bottom, 32)
+                }
+                .refreshable {
+                    await store.loadGames()
                 }
             }
-            .navigationTitle("我的")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingAddAccount = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                }
-            }
-            .sheet(isPresented: $showingAddAccount) {
-                AddSteamAccountView { account in
-                    var updated = accounts
-
-                    if let index = updated.firstIndex(
-                        where: { $0.steamID64 == account.steamID64 }
-                    ) {
-                        updated[index] = account
-                    } else {
-                        updated.append(account)
-                    }
-
-                    saveAccounts(updated)
-                    selectedSteamID = account.steamID64
-                }
-                .preferredColorScheme(.dark)
-            }
-            .alert(
-                "删除账号？",
-                isPresented: $showingDeleteAlert,
-                presenting: accountToDelete
-            ) { account in
-                Button("取消", role: .cancel) {}
-
-                Button("删除", role: .destructive) {
-                    let updated = accounts.filter {
-                        $0.steamID64 != account.steamID64
-                    }
-
-                    saveAccounts(updated)
-
-                    if selectedSteamID == account.steamID64 {
-                        selectedSteamID = updated.first?.steamID64 ?? ""
-                    }
-                }
-            } message: { account in
-                Text("只会删除本 App 中的“\(account.nickname)”资料。")
-            }
-            .onAppear {
-                if selectedSteamID.isEmpty,
-                   let first = accounts.first {
-                    selectedSteamID = first.steamID64
-                }
+            .toolbar(.hidden, for: .navigationBar)
+        }
+        .task {
+            if store.games.isEmpty {
+                await store.loadGames()
             }
         }
     }
 
-    private var profileHeader: some View {
-        VStack(spacing: 12) {
-            accountAvatar(selectedAccount, size: 88)
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.white)
+                    .frame(width: 44, height: 44)
 
-            Text(selectedAccount?.nickname ?? "尚未添加账号")
-                .font(.title2.bold())
-                .foregroundStyle(.white)
+                Image(systemName: "e.square.fill")
+                    .font(.system(size: 28, weight: .black))
+                    .foregroundStyle(Color.black)
+            }
 
-            if let account = selectedAccount {
-                Text("SteamID64：\(account.steamID64)")
-                    .font(.caption)
-                    .foregroundStyle(AppStyle.secondary)
-                    .textSelection(.enabled)
-
-                Text("当前选中账号")
-                    .font(.caption.bold())
-                    .foregroundStyle(AppStyle.green)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        AppStyle.green.opacity(0.13),
-                        in: Capsule()
+            VStack(alignment: .leading, spacing: 3) {
+                Text("EPIC GAMES")
+                    .font(
+                        .system(
+                            size: 20,
+                            weight: .black,
+                            design: .rounded
+                        )
                     )
-            } else {
-                Text("添加账号资料，管理你的多个账号")
-                    .font(.caption)
-                    .foregroundStyle(AppStyle.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
-        .background(
-            AppStyle.card,
-            in: RoundedRectangle(cornerRadius: 22)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 22)
-                .stroke(AppStyle.border)
-        }
-    }
-
-    private func accountRow(_ account: SteamAccount) -> some View {
-        let isSelected = account.steamID64 == selectedSteamID
-
-        return HStack(spacing: 12) {
-            accountAvatar(account, size: 46)
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(account.nickname)
-                    .font(.subheadline.bold())
+                    .tracking(1.1)
                     .foregroundStyle(.white)
-                    .lineLimit(1)
 
-                Text(account.steamID64)
-                    .font(.caption2)
-                    .foregroundStyle(AppStyle.secondary)
-                    .lineLimit(1)
+                Text("STORE · FREE GAMES")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(1.6)
+                    .foregroundStyle(EpicStyle.secondary)
             }
 
-            Spacer(minLength: 4)
+            Spacer()
 
-            if isSelected {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(AppStyle.green)
-            } else {
-                Button("切换") {
-                    selectedSteamID = account.steamID64
-                }
-                .font(.caption.bold())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(AppStyle.blue, in: Capsule())
-            }
-
-            Menu {
-                Button(role: .destructive) {
-                    accountToDelete = account
-                    showingDeleteAlert = true
-                } label: {
-                    Label("删除账号", systemImage: "trash")
+            Button {
+                Task {
+                    await store.loadGames()
                 }
             } label: {
-                Image(systemName: "ellipsis")
-                    .foregroundStyle(AppStyle.secondary)
-                    .frame(width: 28, height: 36)
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background(EpicStyle.panelLight, in: Circle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("刷新 Epic 限免")
         }
-        .padding(12)
+    }
+
+    private var heroPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("FREE GAMES")
+                .font(.system(size: 11, weight: .black))
+                .tracking(2.2)
+                .foregroundStyle(Color.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    Color.white,
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
+
+            Text("免费游戏\n每周上新")
+                .font(.system(size: 32, weight: .black))
+                .foregroundStyle(.white)
+                .lineSpacing(1)
+
+            Text(
+                "领取后永久保留在你的 Epic 游戏库中（以商品具体领取规则为准）。"
+            )
+            .font(.system(size: 12))
+            .foregroundStyle(EpicStyle.secondary)
+            .lineSpacing(4)
+
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 6, height: 6)
+
+                Text("限时领取 · 截止时间实时计算")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(22)
         .background(
-            isSelected ? AppStyle.blue.opacity(0.14) : AppStyle.cardLight,
-            in: RoundedRectangle(cornerRadius: 14)
+            LinearGradient(
+                colors: [
+                    Color(red: 0.22, green: 0.22, blue: 0.25),
+                    Color(red: 0.09, green: 0.09, blue: 0.105)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 18)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(
-                    isSelected ? AppStyle.blue.opacity(0.5) : AppStyle.border
-                )
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(EpicStyle.border, lineWidth: 1)
         }
     }
 
-    @ViewBuilder
-    private func accountAvatar(
-        _ account: SteamAccount?,
-        size: CGFloat
-    ) -> some View {
-        if let account,
-           let url = URL(string: account.avatarURL),
-           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-            AsyncImage(url: url) { phase in
-                if let image = phase.image {
-                    image.resizable().scaledToFill()
-                } else {
-                    defaultAvatar(size: size)
-                }
-            }
-            .frame(width: size, height: size)
-            .clipShape(Circle())
-        } else {
-            defaultAvatar(size: size)
+    private var loadingView: some View {
+        VStack(spacing: 13) {
+            ProgressView()
+                .tint(.white)
+                .scaleEffect(1.15)
+
+            Text("正在获取 Epic 限免信息…")
+                .font(.system(size: 13))
+                .foregroundStyle(EpicStyle.secondary)
         }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
     }
 
-    private func defaultAvatar(size: CGFloat) -> some View {
-        ZStack {
-            AppStyle.cardLight
-
-            Image(systemName: "person.fill")
-                .font(.system(size: size * 0.42))
-                .foregroundStyle(AppStyle.secondary)
-        }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
-    }
-
-    private func saveAccounts(_ list: [SteamAccount]) {
-        guard
-            let data = try? JSONEncoder().encode(list),
-            let json = String(data: data, encoding: .utf8)
-        else {
-            return
-        }
-
-        accountsJSON = json
-    }
-}
-
-// MARK: - Add Steam Account
-
-struct AddSteamAccountView: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let onSave: (SteamAccount) -> Void
-
-    @State private var steamID = ""
-    @State private var nickname = ""
-    @State private var avatarURL = ""
-    @State private var errorMessage: String?
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("账号资料") {
-                    TextField("17 位 SteamID64", text: $steamID)
-                        .keyboardType(.numberPad)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    TextField("显示昵称", text: $nickname)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-
-                    TextField("头像图片 URL（可选）", text: $avatarURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                }
-
-                Section {
-                    Text("可以填写 SteamID64，或粘贴 steamcommunity.com/profiles/数字 格式的个人资料链接。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    Text("当前版本不会自动获取 Steam 账号资料，也不会验证账号所有权。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let errorMessage {
-                    Section {
-                        Text(errorMessage)
-                            .foregroundStyle(.red)
-                    }
-                }
-
-                Section {
-                    Button("保存账号") {
-                        save()
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(AppStyle.background)
-            .navigationTitle("添加账号")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-
-    private func save() {
-        let raw = steamID.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-
-        let normalizedID: String
-
-        if let range = raw.range(
-            of: "steamcommunity.com/profiles/",
-            options: .caseInsensitive
-        ) {
-            let tail = String(raw[range.upperBound...])
-            normalizedID = String(tail.prefix { $0.isNumber })
-        } else {
-            normalizedID = raw
-        }
-
-        guard normalizedID.count == 17,
-              normalizedID.allSatisfy({ $0.isNumber }) else {
-            errorMessage = "请输入正确的 17 位 SteamID64。"
-            return
-        }
-
-        let cleanNickname = nickname.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-
-        guard !cleanNickname.isEmpty else {
-            errorMessage = "请填写显示昵称。"
-            return
-        }
-
-        let cleanAvatar = avatarURL.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-
-        if !cleanAvatar.isEmpty {
-            guard let url = URL(string: cleanAvatar),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
-                errorMessage = "头像地址必须是有效的 HTTP 或 HTTPS 链接。"
-                return
-            }
-        }
-
-        onSave(
-            SteamAccount(
-                steamID64: normalizedID,
-                nickname: cleanNickname,
-                avatarURL: cleanAvatar
-            )
-        )
-
-        dismiss()
-    }
-}
-
-// MARK: - Error and Notice Views
-
-struct ErrorPanel: View {
-    let title: String
-    let message: String
-    let retry: () -> Void
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 42))
-                .foregroundStyle(AppStyle.blue)
-
-            Text(title)
-                .font(.headline)
+    private func errorView(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("暂时无法获取 Epic 限免")
+                .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(.white)
 
             Text(message)
-                .font(.subheadline)
-                .foregroundStyle(AppStyle.secondary)
-                .multilineTextAlignment(.center)
+                .font(.system(size: 12))
+                .foregroundStyle(EpicStyle.secondary)
 
-            Button(action: retry) {
-                Label("重新加载", systemImage: "arrow.clockwise")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 11)
-                    .background(AppStyle.blue, in: Capsule())
+            Button {
+                Task {
+                    await store.loadGames()
+                }
+            } label: {
+                Text("重新加载")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(
+                        .white,
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
             }
             .buttonStyle(.plain)
         }
-        .padding(28)
-        .frame(maxWidth: 420)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            EpicStyle.panel,
+            in: RoundedRectangle(cornerRadius: 14)
+        )
+    }
+
+    private var emptyView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("当前没有检测到限时免费游戏")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text(
+                "也可能是 Epic 接口暂时没有返回可领取的促销信息。下拉刷新后再试。"
+            )
+            .font(.system(size: 12))
+            .foregroundStyle(EpicStyle.secondary)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            EpicStyle.panel,
+            in: RoundedRectangle(cornerRadius: 14)
+        )
     }
 }
 
-struct InlineNotice: View {
-    let message: String
+// MARK: - Epic 游戏卡片
+
+private struct EpicGameCard: View {
+    let game: EpicGame
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle.fill")
-                .foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                AsyncImage(url: URL(string: game.imageURL)) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable()
+                            .aspectRatio(contentMode: .fill)
 
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(AppStyle.secondary)
+                    case .empty:
+                        imagePlaceholder
+                            .overlay {
+                                ProgressView().tint(.white)
+                            }
 
-            Spacer(minLength: 0)
+                    case .failure:
+                        imagePlaceholder
+
+                    @unknown default:
+                        imagePlaceholder
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 190)
+                .clipped()
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.78)],
+                    startPoint: .center,
+                    endPoint: .bottom
+                )
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("EPIC GAMES STORE")
+                        .font(.system(size: 9, weight: .black))
+                        .tracking(1.6)
+                        .foregroundStyle(.white.opacity(0.82))
+
+                    Text(game.name)
+                        .font(.system(size: 21, weight: .black))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .shadow(
+                            color: .black.opacity(0.35),
+                            radius: 4,
+                            y: 2
+                        )
+                }
+                .padding(16)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("限时免费")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white)
+
+                        Text("原价：\(game.originalPrice)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(EpicStyle.secondary)
+                    }
+
+                    Spacer()
+
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("领取剩余时间")
+                            .font(
+                                .system(
+                                    size: 10,
+                                    weight: .medium
+                                )
+                            )
+                            .foregroundStyle(EpicStyle.secondary)
+
+                        if let endDate = game.endDate {
+                            TimelineView(
+                                .periodic(from: .now, by: 60)
+                            ) { context in
+                                Text(
+                                    countdown(
+                                        until: endDate,
+                                        now: context.date
+                                    )
+                                )
+                                .font(
+                                    .system(
+                                        size: 15,
+                                        weight: .black,
+                                        design: .rounded
+                                    )
+                                )
+                                .monospacedDigit()
+                                .foregroundStyle(
+                                    endDate.timeIntervalSince(
+                                        context.date
+                                    ) <= 3600
+                                        ? Color.orange
+                                        : Color.white
+                                )
+                            }
+                        } else {
+                            Text("截止时间暂不可用")
+                                .font(
+                                    .system(
+                                        size: 12,
+                                        weight: .semibold
+                                    )
+                                )
+                                .foregroundStyle(EpicStyle.secondary)
+                        }
+                    }
+                }
+
+                Button {
+                    UIApplication.shared.open(game.storeURL)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "gift.fill")
+                        Text("立即领取")
+                        Spacer()
+                        Image(systemName: "arrow.up.right")
+                    }
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 46)
+                    .background(
+                        Color.white,
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(14)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
         .background(
-            AppStyle.cardLight,
-            in: RoundedRectangle(cornerRadius: 12)
+            EpicStyle.panel,
+            in: RoundedRectangle(cornerRadius: 15)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: 15)
+                .stroke(EpicStyle.border, lineWidth: 1)
+        }
+    }
+
+    private var imagePlaceholder: some View {
+        ZStack {
+            LinearGradient(
+                colors: [EpicStyle.panelLight, EpicStyle.background],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Image(systemName: "gamecontroller.fill")
+                .font(.system(size: 34))
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 190)
+    }
+
+    private func countdown(
+        until endDate: Date,
+        now: Date
+    ) -> String {
+        let seconds = max(
+            0,
+            Int(endDate.timeIntervalSince(now))
+        )
+
+        if seconds <= 0 {
+            return "已截止"
+        }
+
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        let days = hours / 24
+        let remainingHours = hours % 24
+
+        if days > 0 {
+            return "\(days)天 \(remainingHours)小时 \(minutes)分"
+        }
+
+        return "\(hours)小时 \(minutes)分"
     }
 }
