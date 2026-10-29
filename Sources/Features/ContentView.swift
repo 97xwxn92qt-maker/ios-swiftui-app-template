@@ -1,7 +1,5 @@
 
 import SwiftUI
-import UIKit
-import UserNotifications
 
 struct SteamGame: Identifiable, Hashable {
     let id: String
@@ -13,14 +11,17 @@ struct SteamGame: Identifiable, Hashable {
 final class SteamStore: ObservableObject {
     @Published var games: [SteamGame] = []
     @Published var isLoading = false
-    @Published var message = "点击刷新查询当前限免游戏"
+    @Published var message = "点击下方按钮查询当前永久限免游戏"
 
     func refresh() async {
         guard !isLoading else { return }
 
         isLoading = true
-        message = "正在查询 Steam…"
-        defer { isLoading = false }
+        message = "正在查询 Steam 限免信息……"
+
+        defer {
+            isLoading = false
+        }
 
         do {
             let searchURL = URL(
@@ -28,6 +29,7 @@ final class SteamStore: ObservableObject {
             )!
 
             var request = URLRequest(url: searchURL)
+            request.timeoutInterval = 30
             request.setValue(
                 "application/json",
                 forHTTPHeaderField: "Accept"
@@ -39,26 +41,14 @@ final class SteamStore: ObservableObject {
 
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
-                throw NSError(
-                    domain: "SteamStore",
-                    code: 1,
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "Steam 搜索接口请求失败"
-                    ]
-                )
+                throw SteamError.requestFailed
             }
 
             guard let json = try JSONSerialization.jsonObject(
                 with: data
             ) as? [String: Any],
                   let items = json["items"] as? [[String: Any]] else {
-                throw NSError(
-                    domain: "SteamStore",
-                    code: 2,
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "Steam 返回的数据格式不正确"
-                    ]
-                )
+                throw SteamError.invalidResponse
             }
 
             var candidates: [(id: String, name: String)] = []
@@ -67,39 +57,32 @@ final class SteamStore: ObservableObject {
             for item in items {
                 guard let name = item["name"] as? String,
                       let logo = item["logo"] as? String,
-                      let range = logo.range(
-                        of: #"/apps/(\d+)/"#
-                    ) else {
+                      let appID = extractAppID(from: logo),
+                      seen.insert(appID).inserted else {
                     continue
                 }
 
-                let id = String(logo[range])
-                    .split(separator: "/")
-                    .dropFirst()
-                    .first
-                    .map(String.init) ?? ""
-
-                guard !id.isEmpty, seen.insert(id).inserted else {
-                    continue
-                }
-
-                candidates.append((id, name))
+                candidates.append(
+                    (id: appID, name: name)
+                )
             }
 
             var results: [SteamGame] = []
 
             for candidate in candidates {
-                if Task.isCancelled { break }
+                guard !Task.isCancelled else { return }
 
                 if await isPermanentFree(candidate.id) {
+                    let cleanName = candidate.name
+                        .replacingOccurrences(
+                            of: "&amp;",
+                            with: "&"
+                        )
+
                     results.append(
                         SteamGame(
                             id: candidate.id,
-                            name: candidate.name
-                                .replacingOccurrences(
-                                    of: "&amp;",
-                                    with: "&"
-                                ),
+                            name: cleanName,
                             url: URL(
                                 string: "https://store.steampowered.com/app/\(candidate.id)/"
                             )!
@@ -109,13 +92,41 @@ final class SteamStore: ObservableObject {
             }
 
             games = results
-            message = results.isEmpty
-                ? "暂时没有检测到符合条件的永久限免游戏"
-                : "找到 \(results.count) 款永久限免游戏"
+
+            if results.isEmpty {
+                message = "暂时没有检测到符合条件的永久限免游戏"
+            } else {
+                message = "查询完成，共找到 \(results.count) 款永久限免游戏"
+            }
 
         } catch {
-            message = "获取失败：\(error.localizedDescription)"
+            message = "查询失败：\(error.localizedDescription)"
         }
+    }
+
+    private func extractAppID(from logo: String) -> String? {
+        let pattern = #"/apps/(\d+)/"#
+
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern
+        ) else {
+            return nil
+        }
+
+        let range = NSRange(
+            logo.startIndex..<logo.endIndex,
+            in: logo
+        )
+
+        guard let match = regex.firstMatch(
+            in: logo,
+            range: range
+        ),
+        let idRange = Range(match.range(at: 1), in: logo) else {
+            return nil
+        }
+
+        return String(logo[idRange])
     }
 
     private func isPermanentFree(_ appID: String) async -> Bool {
@@ -126,9 +137,17 @@ final class SteamStore: ObservableObject {
         }
 
         do {
-            let (data, _) = try await URLSession.shared.data(
-                from: url
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 20
+
+            let (data, response) = try await URLSession.shared.data(
+                for: request
             )
+
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                return false
+            }
 
             guard let root = try JSONSerialization.jsonObject(
                 with: data
@@ -148,13 +167,15 @@ final class SteamStore: ObservableObject {
                 }
 
                 for sub in subs {
-                    let option = (
+                    let optionText = (
                         sub["option_text"] as? String ?? ""
                     ).lowercased()
 
-                    let price = sub["price_in_cents_with_discount"] as? Int
+                    let price = sub[
+                        "price_in_cents_with_discount"
+                    ] as? Int
 
-                    if option.contains(
+                    if optionText.contains(
                         "limited free promotional package"
                     ), price == 0 {
                         return true
@@ -162,28 +183,44 @@ final class SteamStore: ObservableObject {
                 }
             }
 
+            return false
+
         } catch {
             return false
         }
+    }
+}
 
-        return false
+enum SteamError: LocalizedError {
+    case requestFailed
+    case invalidResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .requestFailed:
+            return "Steam 接口请求失败，请检查网络后重试。"
+        case .invalidResponse:
+            return "Steam 返回的数据格式不正确，请稍后重试。"
+        }
     }
 }
 
 struct ContentView: View {
     @StateObject private var store = SteamStore()
-    @State private var deviceToken = SteamAppDelegate.currentToken
-    @State private var notificationStatus = "正在检查通知权限"
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(
+                        alignment: .leading,
+                        spacing: 12
+                    ) {
                         Text("永久限免助手")
                             .font(.largeTitle.bold())
 
-                        Text("查询 Steam 当前永久入库优惠")
+                        Text("发现 Steam 免费入库游戏")
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
 
                         Button {
@@ -194,19 +231,23 @@ struct ContentView: View {
                             HStack {
                                 if store.isLoading {
                                     ProgressView()
+                                        .tint(.white)
                                 } else {
-                                    Image(systemName: "arrow.clockwise")
+                                    Image(
+                                        systemName: "arrow.clockwise"
+                                    )
                                 }
 
                                 Text(
                                     store.isLoading
-                                    ? "正在刷新…"
+                                    ? "正在查询……"
                                     : "刷新限免列表"
                                 )
                             }
+                            .frame(maxWidth: .infinity)
                         }
-                        .disabled(store.isLoading)
                         .buttonStyle(.borderedProminent)
+                        .disabled(store.isLoading)
 
                         Text(store.message)
                             .font(.footnote)
@@ -215,111 +256,60 @@ struct ContentView: View {
                     .padding(.vertical, 8)
                 }
 
-                Section("当前限免游戏") {
+                Section("永久限免游戏") {
                     if store.games.isEmpty {
-                        Text("刷新后显示查询结果")
-                            .foregroundStyle(.secondary)
-                    }
+                        Text(
+                            store.isLoading
+                            ? "正在检查 Steam 商店……"
+                            : "点击上方按钮开始查询"
+                        )
+                        .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.games) { game in
+                            Link(destination: game.url) {
+                                HStack(spacing: 12) {
+                                    Image(
+                                        systemName: "gamecontroller.fill"
+                                    )
+                                    .font(.title2)
+                                    .foregroundStyle(.secondary)
 
-                    ForEach(store.games) { game in
-                        Link(
-                            destination: game.url
-                        ) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(game.name)
-                                    .font(.headline)
+                                    VStack(
+                                        alignment: .leading,
+                                        spacing: 5
+                                    ) {
+                                        Text(game.name)
+                                            .font(.headline)
+                                            .foregroundStyle(.primary)
 
-                                Text("永久入库优惠 · Steam")
+                                        Text("永久入库优惠 · Steam")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    Image(
+                                        systemName: "arrow.up.right"
+                                    )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 5)
                             }
                         }
                     }
                 }
 
-                Section("iPhone 推送状态") {
-                    HStack {
-                        Text("通知权限")
-                        Spacer()
-                        Text(notificationStatus)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    if deviceToken.isEmpty {
-                        Text("尚未获取设备推送令牌")
-                            .foregroundStyle(.secondary)
-
-                        Button("重新注册远程推送") {
-                            UIApplication.shared
-                                .registerForRemoteNotifications()
-                        }
-                    } else {
-                        Text("设备令牌")
-                            .font(.headline)
-
-                        Text(deviceToken)
-                            .font(.caption2)
-                            .textSelection(.enabled)
-
-                        ShareLink(item: deviceToken) {
-                            Label(
-                                "分享或复制设备令牌",
-                                systemImage: "square.and.arrow.up"
-                            )
-                        }
-                    }
-
+                Section {
                     Text(
-                        "云端推送还需要配置 APNs 密钥和 GitHub Actions。获取令牌不代表推送已经测试成功。"
+                        "数据来自 Steam 商店。查询结果以商店实际优惠信息为准；本应用不会自动领取游戏。"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Steam 限免")
-            .task {
-                await checkNotificationPermission()
-            }
-            .onReceive(
-                NotificationCenter.default.publisher(
-                    for: .steamDeviceTokenUpdated
-                )
-            ) { _ in
-                deviceToken = SteamAppDelegate.currentToken
-            }
         }
     }
-
-    private func checkNotificationPermission() async {
-        let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-
-        switch settings.authorizationStatus {
-        case .authorized, .provisional, .ephemeral:
-            notificationStatus = "已允许"
-        case .denied:
-            notificationStatus = "已拒绝，请在系统设置中开启"
-        case .notDetermined:
-            let granted = try? await center.requestAuthorization(
-                options: [.alert, .sound, .badge]
-            )
-
-            notificationStatus = granted == true
-                ? "已允许"
-                : "未获授权"
-        @unknown default:
-            notificationStatus = "状态未知"
-        }
-
-        if settings.authorizationStatus == .authorized ||
-            settings.authorizationStatus == .notDetermined {
-            UIApplication.shared.registerForRemoteNotifications()
-        }
-    }
-}
-
-extension Notification.Name {
-    static let steamDeviceTokenUpdated = Notification.Name(
-        "steamDeviceTokenUpdated"
-    )
 }
