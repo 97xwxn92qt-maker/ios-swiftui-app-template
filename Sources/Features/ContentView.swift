@@ -12,73 +12,72 @@ struct SteamGame: Identifiable, Hashable {
     var id: String { appID }
 }
 
+struct SteamCandidate {
+    let appID: String
+    let name: String
+}
+
 // MARK: - Steam 数据服务
 
 @MainActor
 final class SteamStore: ObservableObject {
     @Published var games: [SteamGame] = []
     @Published var isLoading = false
-    @Published var message = "点击刷新，查询 Steam 永久限免游戏。"
+    @Published var message = "点击刷新，查询 Steam 永久限免活动。"
     @Published var lastUpdated: Date?
 
     private let country = "sg"
 
-    // MARK: 刷新游戏列表
+    // MARK: 刷新列表
 
     func refresh() async {
         guard !isLoading else { return }
 
         isLoading = true
         message = "正在查询 Steam 活动……"
-
-        defer {
-            isLoading = false
-        }
+        defer { isLoading = false }
 
         do {
             let candidates = try await fetchCandidates()
 
-            if candidates.isEmpty {
+            guard !candidates.isEmpty else {
                 games = []
                 lastUpdated = Date()
-                message = "Steam 接口已响应，但没有找到候选游戏。请稍后重试。"
+                message = "没有解析到候选游戏，请稍后重试。"
                 return
             }
 
-            message = "找到 \(candidates.count) 个候选游戏，正在核实永久限免……"
+            message = "找到 \(candidates.count) 个候选游戏，正在核实资格……"
 
             var verified: [SteamGame] = []
-            var checkedCount = 0
+            var failedCount = 0
 
             for candidate in candidates.prefix(50) {
-                checkedCount += 1
-
                 do {
                     if let game = try await verifyPromotion(
                         appID: candidate.appID,
-                        name: candidate.name
+                        fallbackName: candidate.name
                     ) {
                         verified.append(game)
                     }
                 } catch {
-                    // 单个游戏接口失败时继续检查其他游戏
-                    continue
+                    failedCount += 1
                 }
             }
 
             games = verified.sorted {
-                $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                $0.name.localizedCaseInsensitiveCompare($1.name)
+                    == .orderedAscending
             }
 
             lastUpdated = Date()
 
-            if verified.isEmpty {
-                message = """
-                已检查 \(checkedCount) 个候选游戏，暂未核实到符合条件的永久限免。
-                这不代表 Steam 当前一定没有活动；搜索接口可能未返回相关活动。
-                """
+            if !verified.isEmpty {
+                message = "核实到 \(verified.count) 款永久限免候选游戏，请打开商店确认领取条件。"
+            } else if failedCount == candidates.count {
+                message = "候选游戏已找到，但核实接口全部失败，请检查网络后重试。"
             } else {
-                message = "核实到 \(verified.count) 款永久限免候选游戏。请打开商店页面确认领取条件。"
+                message = "已检查 \(candidates.count) 个候选游戏，暂未核实到符合条件的永久限免。"
             }
         } catch {
             games = []
@@ -86,9 +85,9 @@ final class SteamStore: ObservableObject {
         }
     }
 
-    // MARK: 获取搜索候选
+    // MARK: 获取候选游戏
 
-    private func fetchCandidates() async throws -> [(appID: String, name: String)] {
+    private func fetchCandidates() async throws -> [SteamCandidate] {
         guard let url = URL(
             string: "https://store.steampowered.com/search/results/?specials=1&maxprice=free&json=1&count=50&cc=\(country)&l=schinese"
         ) else {
@@ -105,10 +104,6 @@ final class SteamStore: ObservableObject {
             "https://store.steampowered.com/",
             forHTTPHeaderField: "Referer"
         )
-        request.setValue(
-            "Mozilla/5.0",
-            forHTTPHeaderField: "User-Agent"
-        )
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -122,40 +117,96 @@ final class SteamStore: ObservableObject {
             )
         }
 
-        guard let raw = String(data: data, encoding: .utf8) else {
-            throw SteamError.diagnostic("Steam 返回的内容无法按 UTF-8 解码。")
-        }
-
-        guard let json = try? JSONSerialization.jsonObject(with: data)
+        guard let json = try JSONSerialization.jsonObject(with: data)
                 as? [String: Any] else {
-            let preview = String(raw.prefix(180))
-                .replacingOccurrences(of: "\n", with: " ")
-                .replacingOccurrences(of: "\r", with: " ")
-
-            throw SteamError.diagnostic(
-                "Steam 没有返回 JSON。响应开头：\(preview)"
-            )
+            throw SteamError.diagnostic("Steam 返回内容不是有效 JSON。")
         }
 
-        guard let html = json["results_html"] as? String else {
+        var candidates: [SteamCandidate] = []
+        var seen = Set<String>()
+
+        // 新格式：items 中包含 name 和 logo
+        if let items = json["items"] as? [[String: Any]] {
+            for item in items {
+                let name = decodeHTMLEntities(
+                    item["name"] as? String ?? ""
+                )
+
+                let logo = item["logo"] as? String ?? ""
+
+                // 从类似 /apps/5340370/ 的路径提取 App ID
+                guard let appID = extractAppID(from: logo) else {
+                    continue
+                }
+
+                guard seen.insert(appID).inserted else {
+                    continue
+                }
+
+                candidates.append(
+                    SteamCandidate(
+                        appID: appID,
+                        name: name.isEmpty ? "Steam 游戏 \(appID)" : name
+                    )
+                )
+            }
+        }
+
+        // 旧格式：results_html
+        if let html = json["results_html"] as? String {
+            for candidate in parseHTMLCandidates(html) {
+                guard seen.insert(candidate.appID).inserted else {
+                    continue
+                }
+                candidates.append(candidate)
+            }
+        }
+
+        if candidates.isEmpty {
             let keys = json.keys.sorted().joined(separator: ", ")
+
+            let itemKeys: String
+            if let first = (json["items"] as? [[String: Any]])?.first {
+                itemKeys = first.keys.sorted().joined(separator: ", ")
+            } else {
+                itemKeys = "无 items 示例"
+            }
+
             throw SteamError.diagnostic(
-                "Steam 响应缺少 results_html 字段。现有字段：\(keys)"
+                "没有解析到游戏 ID。顶层字段：\(keys)；items 首项字段：\(itemKeys)"
             )
         }
 
-        return parseCandidates(html)
+        return candidates
     }
 
-    // MARK: 从搜索 HTML 解析候选游戏
+    // MARK: 从图片地址提取 App ID
 
-    private func parseCandidates(
-        _ html: String
-    ) -> [(appID: String, name: String)] {
-        guard let regex = try? NSRegularExpression(
-            pattern: #"data-ds-appid="([^"]+)""#,
-            options: []
-        ) else {
+    private func extractAppID(from text: String) -> String? {
+        let pattern = #"/apps/([0-9]+)/"#
+
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+
+        guard let match = regex.firstMatch(
+            in: text,
+            range: range
+        ), let idRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+
+        return String(text[idRange])
+    }
+
+    // MARK: 兼容旧 HTML 格式
+
+    private func parseHTMLCandidates(_ html: String) -> [SteamCandidate] {
+        let pattern = #"data-ds-appid="([^"]+)""#
+
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return []
         }
 
@@ -165,113 +216,112 @@ final class SteamStore: ObservableObject {
             range: NSRange(location: 0, length: nsHTML.length)
         )
 
-        var results: [(appID: String, name: String)] = []
+        var results: [SteamCandidate] = []
         var seen = Set<String>()
 
         for match in matches {
             guard match.numberOfRanges > 1 else { continue }
 
-            let appIDString = nsHTML.substring(
-                with: match.range(at: 1)
-            )
+            let value = nsHTML.substring(with: match.range(at: 1))
 
-            // 一个搜索结果可能同时包含多个 app ID
-            let appIDs = appIDString
-                .split(separator: ",")
-                .map(String.init)
+            for appID in value.split(separator: ",").map(String.init) {
+                guard appID.allSatisfy(\.isNumber),
+                      seen.insert(appID).inserted else {
+                    continue
+                }
 
-            for appID in appIDs {
-                guard !seen.contains(appID) else { continue }
-                guard appID.allSatisfy(\.isNumber) else { continue }
-
-                seen.insert(appID)
-
-                let name = extractName(
-                    from: html,
-                    around: match.range.location
+                results.append(
+                    SteamCandidate(
+                        appID: appID,
+                        name: "Steam 游戏 \(appID)"
+                    )
                 )
-
-                results.append((
-                    appID: appID,
-                    name: name.isEmpty ? "Steam 游戏 \(appID)" : name
-                ))
             }
         }
 
         return results
     }
 
-    // MARK: 从 HTML 提取名称
+    // MARK: 核实永久限免
 
-    private func extractName(
-        from html: String,
-        around location: Int
-    ) -> String {
-        let nsHTML = html as NSString
-
-        guard nsHTML.length > 0 else {
-            return ""
+    private func verifyPromotion(
+        appID: String,
+        fallbackName: String
+    ) async throws -> SteamGame? {
+        guard let url = URL(
+            string: "https://store.steampowered.com/api/appdetails/?appids=\(appID)&cc=\(country)&l=schinese"
+        ) else {
+            return nil
         }
 
-        let start = max(0, location - 500)
-        let length = min(1800, nsHTML.length - start)
-
-        guard length > 0 else {
-            return ""
-        }
-
-        let fragment = nsHTML.substring(
-            with: NSRange(location: start, length: length)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue(
+            "application/json",
+            forHTTPHeaderField: "Accept"
         )
 
-        let patterns = [
-            #"class="title"[^>]*>(.*?)</span>"#,
-            #"class="[^"]*title[^"]*"[^>]*>(.*?)</span>"#
-        ]
+        let (data, response) = try await URLSession.shared.data(for: request)
 
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(
-                pattern: pattern,
-                options: [.caseInsensitive, .dotMatchesLineSeparators]
-            ) else {
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw SteamError.diagnostic("游戏 \(appID) 的核实请求失败。")
+        }
+
+        guard let root = try JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let entry = root[appID] as? [String: Any],
+              let success = entry["success"] as? Bool,
+              success,
+              let details = entry["data"] as? [String: Any] else {
+            return nil
+        }
+
+        guard let groups = details["package_groups"] as? [[String: Any]] else {
+            return nil
+        }
+
+        var isPermanentPromotion = false
+
+        for group in groups {
+            guard let subs = group["subs"] as? [[String: Any]] else {
                 continue
             }
 
-            let nsFragment = fragment as NSString
-            let range = NSRange(
-                location: 0,
-                length: nsFragment.length
-            )
+            for sub in subs {
+                let optionText = (
+                    sub["option_text"] as? String ?? ""
+                ).lowercased()
 
-            guard let match = regex.firstMatch(
-                in: fragment,
-                range: range
-            ), match.numberOfRanges > 1 else {
-                continue
+                let price = sub["price_in_cents_with_discount"] as? Int
+
+                if optionText.contains("limited free promotional package"),
+                   price == 0 {
+                    isPermanentPromotion = true
+                    break
+                }
             }
 
-            var name = nsFragment.substring(
-                with: match.range(at: 1)
-            )
-
-            name = name.replacingOccurrences(
-                of: "<[^>]+>",
-                with: "",
-                options: .regularExpression
-            )
-
-            name = decodeHTMLEntities(name)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            if !name.isEmpty {
-                return name
+            if isPermanentPromotion {
+                break
             }
         }
 
-        return ""
+        guard isPermanentPromotion,
+              let storeURL = URL(
+                string: "https://store.steampowered.com/app/\(appID)/"
+              ) else {
+            return nil
+        }
+
+        return SteamGame(
+            appID: appID,
+            name: details["name"] as? String ?? fallbackName,
+            storeURL: storeURL
+        )
     }
 
-    // MARK: 处理 HTML 实体
+    // MARK: 解码 HTML 实体
 
     private func decodeHTMLEntities(_ text: String) -> String {
         var result = text
@@ -294,112 +344,15 @@ final class SteamStore: ObservableObject {
 
         return result
     }
-
-    // MARK: 核实是否属于永久限免促销
-
-    private func verifyPromotion(
-        appID: String,
-        name: String
-    ) async throws -> SteamGame? {
-        guard let url = URL(
-            string: "https://store.steampowered.com/api/appdetails/?appids=\(appID)&cc=\(country)&l=schinese"
-        ) else {
-            return nil
-        }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 20
-        request.setValue(
-            "application/json",
-            forHTTPHeaderField: "Accept"
-        )
-        request.setValue(
-            "https://store.steampowered.com/",
-            forHTTPHeaderField: "Referer"
-        )
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode) else {
-            return nil
-        }
-
-        guard let root = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              let appEntry = root[appID] as? [String: Any],
-              let success = appEntry["success"] as? Bool,
-              success,
-              let details = appEntry["data"] as? [String: Any] else {
-            return nil
-        }
-
-        // 仅检查明确标记为 Limited Free Promotional Package 的订阅包
-        guard let packageGroups = details["package_groups"] as? [[String: Any]] else {
-            return nil
-        }
-
-        var isLimitedFreePromotion = false
-
-        for group in packageGroups {
-            guard let subs = group["subs"] as? [[String: Any]] else {
-                continue
-            }
-
-            for sub in subs {
-                let optionText = (
-                    sub["option_text"] as? String ?? ""
-                ).lowercased()
-
-                let price = sub["price_in_cents_with_discount"] as? Int
-
-                if optionText.contains("limited free promotional package"),
-                   price == 0 {
-                    isLimitedFreePromotion = true
-                    break
-                }
-            }
-
-            if isLimitedFreePromotion {
-                break
-            }
-        }
-
-        guard isLimitedFreePromotion else {
-            return nil
-        }
-
-        guard let storeURL = URL(
-            string: "https://store.steampowered.com/app/\(appID)/"
-        ) else {
-            return nil
-        }
-
-        let officialName = details["name"] as? String ?? name
-
-        return SteamGame(
-            appID: appID,
-            name: officialName,
-            storeURL: storeURL
-        )
-    }
 }
 
 // MARK: - 错误信息
 
 enum SteamError: LocalizedError {
-    case badResponse
-    case invalidData
     case diagnostic(String)
 
     var errorDescription: String? {
         switch self {
-        case .badResponse:
-            return "Steam 服务器暂时无法访问。"
-
-        case .invalidData:
-            return "Steam 返回的数据格式不符合预期。"
-
         case .diagnostic(let message):
             return message
         }
@@ -422,7 +375,7 @@ struct ContentView: View {
                     Text("Steam 永久限免")
                         .font(.title2.bold())
 
-                    Text("筛选限时免费领取、领取后永久保留的游戏活动")
+                    Text("筛选限时免费领取、领取后永久保留的游戏")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -451,21 +404,17 @@ struct ContentView: View {
                 }
                 .padding()
 
-                if let lastUpdated = store.lastUpdated {
-                    Text(
-                        "上次检查：\(lastUpdated.formatted(date: .abbreviated, time: .shortened))"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.bottom, 8)
+                if let updated = store.lastUpdated {
+                    Text("上次检查：\(updated.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 8)
                 }
 
                 Text(store.message)
                     .font(.footnote)
                     .foregroundStyle(
-                        store.message.hasPrefix("获取失败")
-                            ? .red
-                            : .secondary
+                        store.message.hasPrefix("获取失败") ? .red : .secondary
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal)
@@ -481,7 +430,7 @@ struct ContentView: View {
                         .font(.headline)
                         .padding(.top, 8)
 
-                    Text("可以点击上方按钮重新查询。")
+                    Text("点击上方按钮重新查询。")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 
@@ -521,7 +470,7 @@ struct ContentView: View {
 
                 Divider()
 
-                Text("本应用只负责查询和筛选，不会自动领取。Steam 活动信息可能变化，请以商店页面为准。")
+                Text("本应用目前只查询和筛选，不会自动领取。最终资格以 Steam 商店页面为准。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
