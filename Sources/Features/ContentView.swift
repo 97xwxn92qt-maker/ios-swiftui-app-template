@@ -2227,7 +2227,7 @@ private struct CloudFavorite: Decodable, Identifiable {
     var game_name: String
     var image_url: String
     var store_url: String
-    var id: String { "\\(store):\\(app_id)" }
+    var id: String { "\(store):\(app_id)" }
 
     init(store: String, app_id: String, game_name: String, image_url: String, store_url: String) {
         self.store = store; self.app_id = app_id; self.game_name = game_name
@@ -2247,7 +2247,7 @@ private final class AppAccountStore: ObservableObject {
     @Published var needsLoginPrompt = false
 
     func isFavorite(store: String, appID: String) -> Bool {
-        favoriteKeys.contains("\\(store):\\(appID)")
+        favoriteKeys.contains("\(store):\(appID)")
     }
 
     func loadFavorites() async {
@@ -2256,15 +2256,15 @@ private final class AppAccountStore: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \\(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
             let rows = try JSONDecoder().decode([CloudFavorite].self, from: data)
             favoriteRecords = rows
-            favoriteKeys = Set(rows.map { "\\($0.store):\\($0.app_id)" })
+            favoriteKeys = Set(rows.map { "\($0.store):\($0.app_id)" })
         } catch {
-            message = "读取云端收藏失败：\\(error.localizedDescription)"
+            message = "读取云端收藏失败：\(error.localizedDescription)"
         }
     }
 
@@ -2274,12 +2274,12 @@ private final class AppAccountStore: ObservableObject {
             message = "请先登录，再使用云端收藏。"
             return
         }
-        let key = "\\(store):\\(appID)"
+        let key = "\(store):\(appID)"
         guard let encodedID = appID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: SupabaseConfig.projectURL + "/rest/v1/game_favorites?store=eq.\\(store)&app_id=eq.\\(encodedID)") else { return }
+              let url = URL(string: SupabaseConfig.projectURL + "/rest/v1/game_favorites?store=eq.\(store)&app_id=eq.\(encodedID)") else { return }
         var request = URLRequest(url: url)
         request.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \\(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         do {
             if favoriteKeys.contains(key) {
                 request.httpMethod = "DELETE"
@@ -2295,7 +2295,7 @@ private final class AppAccountStore: ObservableObject {
                 var insert = URLRequest(url: insertURL)
                 insert.httpMethod = "POST"
                 insert.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
-                insert.setValue("Bearer \\(token)", forHTTPHeaderField: "Authorization")
+                insert.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
                 insert.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 insert.setValue("resolution=merge-duplicates,return=minimal", forHTTPHeaderField: "Prefer")
                 let body: [String: Any] = ["store": store, "app_id": appID, "game_name": name,
@@ -2310,7 +2310,7 @@ private final class AppAccountStore: ObservableObject {
                 message = "已加入收藏。"
             }
         } catch {
-            message = "收藏操作失败：\\(error.localizedDescription)"
+            message = "收藏操作失败：\(error.localizedDescription)"
         }
     }
 
@@ -2597,7 +2597,7 @@ private struct AccountHomeView: View {
     private var quickActions: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("我的游戏").font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
-            actionRow("我的收藏", subtitle: "Steam + Epic · \\(account.favoriteRecords.count) 款", icon: "heart.fill")
+            actionRow("我的收藏", subtitle: "Steam + Epic · \(account.favoriteRecords.count) 款", icon: "heart.fill")
             actionRow("最近浏览", subtitle: "回到刚刚看过的游戏", icon: "clock.fill")
             actionRow("发行日历", subtitle: "关注近期即将发行的游戏", icon: "calendar")
         }.padding(16).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
