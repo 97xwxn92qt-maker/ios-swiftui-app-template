@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import UIKit
 import Security
+import PhotosUI
 
 // MARK: - 样式
 
@@ -75,6 +76,17 @@ struct SteamFreeGame: Identifiable, Hashable {
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
+}
+
+// Steam 即将推出游戏（计划发行日期来自 Steam 商店）
+struct SteamUpcomingGame: Identifiable, Hashable {
+    let id: Int
+    let name: String
+    let imageURL: String
+    let releaseText: String
+    let releaseDate: Date?
+
+    var storeURL: URL { URL(string: "https://store.steampowered.com/app/\(id)/")! }
 }
 
 // 新增：Steam 搜索结果
@@ -473,6 +485,40 @@ enum SteamAPI {
         return results
     }
 
+    // Steam 官方 Upcoming 搜索目录：仅展示未来约 60 天内有明确日期的商品。
+    static func fetchUpcomingGames() async throws -> [SteamUpcomingGame] {
+        guard let url = makeURL(
+            "https://store.steampowered.com/search/results/",
+            queryItems: [
+                URLQueryItem(name: "filter", value: "comingsoon"),
+                URLQueryItem(name: "json", value: "1"),
+                URLQueryItem(name: "count", value: "100"),
+                URLQueryItem(name: "cc", value: countryCode),
+                URLQueryItem(name: "l", value: language)
+            ]
+        ) else { throw URLError(.badURL) }
+
+        let root = dictionary(try await requestJSON(url))
+        let items = root["items"] as? [[String: Any]] ?? []
+        var games: [SteamUpcomingGame] = []
+        var seen = Set<Int>()
+        let now = Date()
+        let upperBound = Calendar.current.date(byAdding: .day, value: 60, to: now) ?? now
+
+        for item in items {
+            let id = intValue(item["id"])
+            let name = string(item["name"])
+            guard id > 0, !name.isEmpty, seen.insert(id).inserted else { continue }
+            let releaseText = string(item["release_date"])
+            guard let date = parseSteamReleaseDate(releaseText), date >= Calendar.current.startOfDay(for: now), date <= upperBound else { continue }
+            let image = imageFromItem(item).isEmpty
+                ? "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/\(id)/header.jpg"
+                : imageFromItem(item)
+            games.append(SteamUpcomingGame(id: id, name: name, imageURL: image, releaseText: releaseText, releaseDate: date))
+        }
+        return games.sorted { ($0.releaseDate ?? .distantFuture) < ($1.releaseDate ?? .distantFuture) }
+    }
+
     private static func parseSteamReleaseDate(_ value: String) -> Date? {
         guard !value.isEmpty else { return nil }
 
@@ -808,6 +854,24 @@ final class SteamFreeStore: ObservableObject {
 }
 
 @MainActor
+final class SteamUpcomingStore: ObservableObject {
+    @Published var games: [SteamUpcomingGame] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    func loadGames() async {
+        guard !isLoading else { return }
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+        do {
+            games = try await SteamAPI.fetchUpcomingGames()
+            if games.isEmpty { errorMessage = "未来 60 天内暂时没有解析到明确发行日期的游戏，请稍后刷新。" }
+        } catch { errorMessage = error.localizedDescription }
+    }
+}
+
+@MainActor
 final class SteamSearchStore: ObservableObject {
     @Published var games: [SteamSearchGame] = []
     @Published var isLoading = false
@@ -882,6 +946,7 @@ private struct SteamCardButtonStyle: ButtonStyle {
 struct ContentView: View {
     @State private var selectedPlatform = 0
     @StateObject private var accountStore = AppAccountStore()
+    @AppStorage("app.appearance") private var appearance = "dark"
 
     var body: some View {
         TabView(selection: $selectedPlatform) {
@@ -907,7 +972,7 @@ struct ContentView: View {
                 .tag(2)
         }
         .tint(selectedPlatform == 0 ? SteamStyle.cyan : .white)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(appearance == "system" ? nil : (appearance == "light" ? .light : .dark))
         .onOpenURL { url in
             Task { await accountStore.handleAuthCallback(url) }
         }
@@ -991,12 +1056,12 @@ private struct SteamHomeView: View {
     private var featureEntry: some View {
         VStack(spacing: 11) {
             NavigationLink {
-                SteamFreeHomeView()
+                SteamUpcomingHomeView()
             } label: {
                 featureRow(
                     icon: "gamecontroller.fill",
-                    title: "Steam 免费开玩",
-                    subtitle: "发现 Steam 当前免费游戏",
+                    title: "Steam 即将推出",
+                    subtitle: "查看未来两个月计划发行的游戏",
                     color: SteamStyle.green
                 )
             }
@@ -1422,253 +1487,122 @@ private struct GameCard: View {
     }
 }
 
-// MARK: - Steam 免费开玩页面
+// MARK: - Steam 即将推出页面
 
-private struct SteamFreeHomeView: View {
-    @StateObject private var store = SteamFreeStore()
-    @State private var selectedCategory = 0
+private struct SteamUpcomingHomeView: View {
+    @StateObject private var store = SteamUpcomingStore()
+    @State private var selectedRange = 0
 
-    private var displayedGames: [SteamFreeGame] {
-        selectedCategory == 0 ? store.recentGames : store.historicalGames
+    private var displayedGames: [SteamUpcomingGame] {
+        guard selectedRange == 1 else { return store.games }
+        return store.games.filter {
+            guard let date = $0.releaseDate else { return false }
+            return Calendar.current.isDate(date, equalTo: Date(), toGranularity: .month)
+        }
     }
 
     var body: some View {
         ZStack {
             SteamStyle.background.ignoresSafeArea()
-
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 20) {
+                VStack(spacing: 18) {
                     header
-
-                    Picker("分类", selection: $selectedCategory) {
-                        Text("最近免费").tag(0)
-                        Text("历史免费").tag(1)
+                    Picker("发行范围", selection: $selectedRange) {
+                        Text("未来 60 天").tag(0)
+                        Text("本月发行").tag(1)
                     }
                     .pickerStyle(.segmented)
                     .tint(SteamStyle.cyan)
 
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(selectedCategory == 0 ? "最近发行" : "较早发行")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(.white)
-
-                            Text("Steam 当前免费游戏目录")
-                                .font(.system(size: 11))
-                                .foregroundStyle(SteamStyle.secondary)
+                            Text("即将登陆 Steam")
+                                .font(.system(size: 19, weight: .bold)).foregroundStyle(.white)
+                            Text("按预计发行日期排序 · 最多展示未来 60 天")
+                                .font(.system(size: 11)).foregroundStyle(SteamStyle.secondary)
                         }
-
                         Spacer()
-
                         Text("\(displayedGames.count) 款")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(SteamStyle.cyan)
+                            .font(.system(size: 12, weight: .bold)).foregroundStyle(SteamStyle.cyan)
                     }
 
                     if store.isLoading && store.games.isEmpty {
-                        loadingView
-                    } else if let error = store.errorMessage,
-                              store.games.isEmpty {
-                        errorView(error)
+                        VStack(spacing: 12) { ProgressView().tint(SteamStyle.cyan); Text("正在获取 Steam 即将推出的游戏…").foregroundStyle(SteamStyle.secondary) }.padding(.vertical, 40)
+                    } else if let error = store.errorMessage, store.games.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "calendar.badge.exclamationmark").font(.system(size: 32)).foregroundStyle(SteamStyle.cyan)
+                            Text(error).font(.system(size: 13)).foregroundStyle(SteamStyle.secondary).multilineTextAlignment(.center)
+                            Button("重新加载") { Task { await store.loadGames() } }.foregroundStyle(SteamStyle.cyan)
+                        }.frame(maxWidth: .infinity).padding(24).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 16))
                     } else if displayedGames.isEmpty {
-                        emptyView
+                        Text("这个时间范围内暂无已确认发行日期的游戏").font(.system(size: 13)).foregroundStyle(SteamStyle.secondary).padding(.vertical, 35)
                     } else {
                         LazyVStack(spacing: 13) {
                             ForEach(displayedGames) { game in
-                                SteamFreeGameCard(game: game)
+                                SteamUpcomingGameCard(game: game)
                             }
                         }
                     }
-
-                    Text("分类依据游戏发布日期；免费状态以 Steam 商店页面为准。")
-                        .font(.system(size: 10))
-                        .foregroundStyle(SteamStyle.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 8)
+                    Text("发行日期以 Steam 商店页面为准；Steam 可能随时调整游戏发行计划。未确定日期的商品暂不显示。")
+                        .font(.system(size: 10)).foregroundStyle(SteamStyle.secondary).lineSpacing(3)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                 }
-                .frame(maxWidth: 560)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 30)
+                .frame(maxWidth: 560).frame(maxWidth: .infinity)
+                .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 30)
             }
-            .refreshable {
-                await store.loadGames()
-            }
+            .refreshable { await store.loadGames() }
         }
-        .navigationTitle("Steam 免费开玩")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Steam 即将推出").navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
-        .task {
-            if store.games.isEmpty {
-                await store.loadGames()
-            }
-        }
+        .task { if store.games.isEmpty { await store.loadGames() } }
     }
 
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("FREE TO PLAY")
-                    .font(.system(size: 11, weight: .black))
-                    .tracking(2)
-                    .foregroundStyle(SteamStyle.cyan)
-
-                Text("Steam 免费开玩")
-                    .font(.system(size: 23, weight: .bold))
-                    .foregroundStyle(.white)
-
-                Text("发现可以直接免费游玩的游戏")
-                    .font(.system(size: 12))
-                    .foregroundStyle(SteamStyle.secondary)
+        HStack(spacing: 12) {
+            Image(systemName: "calendar.badge.clock").font(.system(size: 28, weight: .bold)).foregroundStyle(SteamStyle.cyan)
+                .frame(width: 56, height: 56).background(SteamStyle.cyan.opacity(0.13), in: RoundedRectangle(cornerRadius: 16))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("COMING SOON").font(.system(size: 10, weight: .black)).tracking(2).foregroundStyle(SteamStyle.cyan)
+                Text("近期即将上架").font(.system(size: 22, weight: .bold)).foregroundStyle(.white)
+                Text("提前发现值得关注的新游戏").font(.system(size: 11)).foregroundStyle(SteamStyle.secondary)
             }
-
             Spacer()
-
-            Button {
-                Task { await store.loadGames() }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(SteamStyle.cyan)
-                    .frame(width: 42, height: 42)
-                    .background(SteamStyle.cardLight, in: Circle())
-            }
-            .buttonStyle(.plain)
+            Button { Task { await store.loadGames() } } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 15, weight: .bold)).foregroundStyle(SteamStyle.cyan)
+                    .frame(width: 42, height: 42).background(SteamStyle.cardLight, in: Circle())
+            }.buttonStyle(.plain)
         }
-    }
-
-    private var loadingView: some View {
-        VStack(spacing: 12) {
-            ProgressView().tint(SteamStyle.cyan)
-            Text("正在获取 Steam 免费游戏…")
-                .font(.system(size: 13))
-                .foregroundStyle(SteamStyle.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 60)
-    }
-
-    private func errorView(_ message: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 30))
-                .foregroundStyle(SteamStyle.cyan)
-
-            Text("获取失败")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundStyle(.white)
-
-            Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(SteamStyle.secondary)
-                .multilineTextAlignment(.center)
-
-            Button("重新加载") {
-                Task { await store.loadGames() }
-            }
-            .foregroundStyle(SteamStyle.cyan)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(25)
-        .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 16))
-    }
-
-    private var emptyView: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "gamecontroller")
-                .font(.system(size: 32))
-                .foregroundStyle(SteamStyle.cyan)
-
-            Text("这个分类暂时没有游戏")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
-
-            Text("可以切换分类或下拉刷新")
-                .font(.system(size: 12))
-                .foregroundStyle(SteamStyle.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 55)
     }
 }
 
-// MARK: - 免费游戏卡片
-
-private struct SteamFreeGameCard: View {
-    let game: SteamFreeGame
-
+private struct SteamUpcomingGameCard: View {
+    let game: SteamUpcomingGame
+    private var dateLabel: String {
+        guard let date = game.releaseDate else { return game.releaseText }
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "zh_CN"); formatter.dateFormat = "M月d日"
+        return formatter.string(from: date)
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
+        VStack(spacing: 11) {
             HStack(spacing: 12) {
                 AsyncImage(url: URL(string: game.imageURL)) { phase in
-                    if let image = phase.image {
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } else {
-                        ZStack {
-                            SteamStyle.cardLight
-                            Image(systemName: "gamecontroller.fill")
-                                .foregroundStyle(SteamStyle.cyan)
-                        }
-                    }
+                    if let image = phase.image { image.resizable().aspectRatio(contentMode: .fill) }
+                    else { RoundedRectangle(cornerRadius: 10).fill(SteamStyle.cardLight).overlay(Image(systemName: "gamecontroller.fill").foregroundStyle(SteamStyle.secondary)) }
                 }
-                .frame(width: 118, height: 74)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(game.name)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-
-                    Text("免费游玩")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(SteamStyle.green)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(SteamStyle.green.opacity(0.13), in: Capsule())
-
-                    Text(releaseText)
-                        .font(.system(size: 10))
-                        .foregroundStyle(SteamStyle.secondary)
+                .frame(width: 116, height: 70).clipShape(RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(game.name).font(.system(size: 14, weight: .bold)).foregroundStyle(.white).lineLimit(2)
+                    Label(dateLabel, systemImage: "calendar").font(.system(size: 11, weight: .semibold)).foregroundStyle(SteamStyle.cyan)
+                    Text("预计发行 · Steam 商店").font(.system(size: 10)).foregroundStyle(SteamStyle.secondary)
                 }
-
                 Spacer(minLength: 0)
             }
-
-            Button {
-                UIApplication.shared.open(game.storeURL)
-            } label: {
-                HStack {
-                    Image(systemName: "play.fill")
-                    Text("打开 Steam 游戏页面")
-                    Spacer()
-                    Image(systemName: "arrow.up.right")
-                }
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 13)
-                .frame(height: 40)
-                .background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 9))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(12)
-        .background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 15))
-        .overlay {
-            RoundedRectangle(cornerRadius: 15)
-                .stroke(SteamStyle.border, lineWidth: 1)
-        }
-    }
-
-    private var releaseText: String {
-        guard let date = game.releaseDate else {
-            return "发行日期未知"
-        }
-
-        return "发行日期：" + date.formatted(
-            .dateTime.year().month().day()
-        )
+            Button { UIApplication.shared.open(game.storeURL) } label: {
+                HStack { Image(systemName: "arrow.up.right.square"); Text("查看 Steam 页面"); Spacer(); Text("Steam").foregroundStyle(.white.opacity(0.75)) }
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(.white).padding(.horizontal, 14).frame(height: 42)
+                    .background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 11))
+            }.buttonStyle(.plain)
+        }.padding(13).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 17)).overlay(RoundedRectangle(cornerRadius: 17).stroke(SteamStyle.border, lineWidth: 1))
     }
 }
 
@@ -2395,70 +2329,263 @@ private final class AppAccountStore: ObservableObject {
 
 private struct AccountHomeView: View {
     @ObservedObject var account: AppAccountStore
+    @AppStorage("app.profile.nickname") private var nickname = ""
+    @AppStorage("app.profile.avatarBase64") private var avatarBase64 = ""
+    @AppStorage("app.appearance") private var appearance = "dark"
+    @AppStorage("app.checkin.dates") private var checkinDatesRaw = ""
     @State private var isRegisterMode = false
     @State private var email = ""
     @State private var password = ""
+    @State private var showProfileEditor = false
+    @State private var showSettings = false
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var profileDraft = ""
+
+    private var checkinDates: Set<String> { Set(checkinDatesRaw.split(separator: ",").map(String.init)) }
+    private var todayKey: String { Self.dayFormatter.string(from: Date()) }
+    private var hasCheckedIn: Bool { checkinDates.contains(todayKey) }
+    private var streakCount: Int {
+        var count = 0
+        var day = Calendar.current.startOfDay(for: Date())
+        while checkinDates.contains(Self.dayFormatter.string(from: day)) {
+            count += 1
+            guard let previous = Calendar.current.date(byAdding: .day, value: -1, to: day) else { break }
+            day = previous
+        }
+        return count
+    }
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = .current; f.dateFormat = "yyyy-MM-dd"; return f
+    }()
 
     var body: some View {
         NavigationStack {
             ZStack {
                 SteamStyle.background.ignoresSafeArea()
-                ScrollView {
-                    VStack(spacing: 20) {
-                        VStack(spacing: 10) {
-                            Image(systemName: "person.crop.circle.fill")
-                                .font(.system(size: 66)).foregroundStyle(SteamStyle.cyan)
-                            Text("我的账户").font(.system(size: 25, weight: .bold)).foregroundStyle(.white)
-                            Text("独立于 Steam 的 App 账户").font(.system(size: 13)).foregroundStyle(SteamStyle.secondary)
-                        }.padding(.top, 34)
-
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 16) {
                         if account.isLoggedIn {
-                            VStack(spacing: 14) {
-                                Image(systemName: "checkmark.seal.fill").font(.system(size: 34)).foregroundStyle(SteamStyle.green)
-                                Text("已登录").font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
-                                Text(account.email.isEmpty ? "账户登录状态已保存" : account.email)
-                                    .font(.system(size: 14)).foregroundStyle(SteamStyle.secondary)
-                                Button { Task { await account.signOut() } } label: {
-                                    Text("退出登录").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                                        .frame(maxWidth: .infinity).frame(height: 48).background(SteamStyle.cardLight, in: RoundedRectangle(cornerRadius: 12))
-                                }
-                            }.padding(20).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+                            profileCard
+                            checkinCard
+                            quickActions
+                            settingsCard
+                            accountActions
                         } else {
-                            VStack(spacing: 14) {
-                                HStack(spacing: 0) {
-                                    modeButton("登录", selected: !isRegisterMode) { isRegisterMode = false }
-                                    modeButton("注册", selected: isRegisterMode) { isRegisterMode = true }
-                                }.padding(4).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 12))
-                                TextField("邮箱地址", text: $email).textInputAutocapitalization(.never).keyboardType(.emailAddress).autocorrectionDisabled()
-                                    .padding(14).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
-                                SecureField("密码（至少 6 位）", text: $password)
-                                    .padding(14).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
-                                Button {
-                                    Task {
-                                        if isRegisterMode { await account.signUp(email: email, password: password) }
-                                        else { await account.signIn(email: email, password: password) }
-                                    }
-                                } label: {
-                                    HStack { if account.isBusy { ProgressView().tint(.white) }; Text(isRegisterMode ? "创建账户" : "登录账户") }
-                                        .font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                                        .frame(maxWidth: .infinity).frame(height: 48).background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 11))
-                                }.disabled(account.isBusy)
-                            }.padding(18).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+                            guestHeader
+                            authCard
                         }
                         if let message = account.message {
                             Text(message).font(.system(size: 12)).foregroundStyle(SteamStyle.cyan)
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(14)
-                                .background(SteamStyle.cardLight, in: RoundedRectangle(cornerRadius: 10))
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(13)
+                                .background(SteamStyle.cardLight, in: RoundedRectangle(cornerRadius: 12))
                         }
-                        Text("账户由本 App 的 Supabase 项目管理，与 Steam 登录、Steam 密码及 Steam 账号无关。请勿将 Supabase service_role 密钥写入客户端。")
-                            .font(.system(size: 11)).foregroundStyle(SteamStyle.secondary).lineSpacing(4)
-                    }.padding(20).frame(maxWidth: 520).frame(maxWidth: .infinity)
+                        Text("限免领取 App 账户独立于 Steam 账号。我们不会要求你的 Steam 密码。")
+                            .font(.system(size: 10)).foregroundStyle(SteamStyle.secondary).lineSpacing(3)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
+                    }.padding(18).frame(maxWidth: 560).frame(maxWidth: .infinity)
                 }
             }
             .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)
+            .sheet(isPresented: $showProfileEditor) { profileEditor }
+            .sheet(isPresented: $showSettings) { settingsSheet }
+            .onChange(of: selectedPhoto) { _, item in
+                Task {
+                    guard let data = try? await item?.loadTransferable(type: Data.self),
+                          let image = UIImage(data: data),
+                          let resized = image.jpegData(compressionQuality: 0.78) else { return }
+                    avatarBase64 = resized.base64EncodedString()
+                }
+            }
         }
+    }
+
+    private var guestHeader: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "person.crop.circle.fill").font(.system(size: 66)).foregroundStyle(SteamStyle.cyan)
+            Text("欢迎来到限免领取").font(.system(size: 23, weight: .bold)).foregroundStyle(.white)
+            Text("登录后管理个人资料、收藏和签到").font(.system(size: 12)).foregroundStyle(SteamStyle.secondary)
+        }.frame(maxWidth: .infinity).padding(.vertical, 24)
+    }
+
+    private var authCard: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 0) {
+                modeButton("登录", selected: !isRegisterMode) { isRegisterMode = false }
+                modeButton("注册", selected: isRegisterMode) { isRegisterMode = true }
+            }.padding(4).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 12))
+            TextField("邮箱地址", text: $email).textInputAutocapitalization(.never).keyboardType(.emailAddress).autocorrectionDisabled()
+                .padding(14).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
+            SecureField("密码（至少 6 位）", text: $password)
+                .padding(14).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
+            Button {
+                Task { if isRegisterMode { await account.signUp(email: email, password: password) } else { await account.signIn(email: email, password: password) } }
+            } label: {
+                HStack { if account.isBusy { ProgressView().tint(.white) }; Text(isRegisterMode ? "创建账户" : "登录账户") }
+                    .font(.system(size: 15, weight: .bold)).foregroundStyle(.white).frame(maxWidth: .infinity).frame(height: 48)
+                    .background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 11))
+            }.disabled(account.isBusy)
+        }.padding(18).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var profileCard: some View {
+        HStack(spacing: 14) {
+            avatarView(size: 66)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(nickname.isEmpty ? "限免玩家" : nickname).font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                Text(account.email).font(.system(size: 11)).foregroundStyle(SteamStyle.secondary).lineLimit(1)
+                Text("App 玩家账户").font(.system(size: 10, weight: .semibold)).foregroundStyle(SteamStyle.cyan)
+            }
+            Spacer()
+            Button { profileDraft = nickname; showProfileEditor = true } label: {
+                Image(systemName: "pencil").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 36, height: 36).background(SteamStyle.cardLight, in: Circle())
+            }.buttonStyle(.plain)
+        }.padding(16).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var checkinCard: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("每日签到").font(.system(size: 17, weight: .bold)).foregroundStyle(.white)
+                    Text("养成每天发现好游戏的习惯").font(.system(size: 10)).foregroundStyle(SteamStyle.secondary)
+                }
+                Spacer()
+                Image(systemName: "calendar.badge.checkmark").font(.system(size: 25)).foregroundStyle(SteamStyle.green)
+            }
+            HStack(spacing: 0) {
+                statCell("连续签到", value: "\(streakCount) 天", icon: "flame.fill")
+                statCell("累计签到", value: "\(checkinDates.count) 天", icon: "checkmark.seal.fill")
+            }
+            Button {
+                guard !hasCheckedIn else { return }
+                var dates = checkinDates; dates.insert(todayKey); checkinDatesRaw = dates.sorted().joined(separator: ",")
+                account.message = "签到成功！明天记得再来。"
+            } label: {
+                HStack { Image(systemName: hasCheckedIn ? "checkmark.circle.fill" : "gift.fill"); Text(hasCheckedIn ? "今日已签到" : "立即签到") }
+                    .font(.system(size: 14, weight: .bold)).foregroundStyle(.white).frame(maxWidth: .infinity).frame(height: 45)
+                    .background(hasCheckedIn ? SteamStyle.cardLight : SteamStyle.blue, in: RoundedRectangle(cornerRadius: 11))
+            }.disabled(hasCheckedIn).buttonStyle(.plain)
+            Text("当前签到记录保存在本机；云端同步将在下一步接入 Supabase 数据表。")
+                .font(.system(size: 9)).foregroundStyle(SteamStyle.secondary)
+        }.padding(16).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var quickActions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("我的游戏").font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
+            actionRow("我的收藏", subtitle: "收藏喜欢的 Steam 游戏", icon: "heart.fill")
+            actionRow("最近浏览", subtitle: "回到刚刚看过的游戏", icon: "clock.fill")
+            actionRow("发行日历", subtitle: "关注近期即将发行的游戏", icon: "calendar")
+        }.padding(16).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var settingsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("偏好与设置").font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
+            Button { showSettings = true } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "slider.horizontal.3").foregroundStyle(SteamStyle.cyan).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("外观与设置").font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                        Text(appearanceLabel).font(.system(size: 10)).foregroundStyle(SteamStyle.secondary)
+                    }
+                    Spacer(); Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold)).foregroundStyle(SteamStyle.secondary)
+                }.padding(.vertical, 7)
+            }.buttonStyle(.plain)
+            actionRow("账户安全", subtitle: "邮箱账户由 Supabase 安全管理", icon: "lock.shield")
+            actionRow("意见反馈", subtitle: "帮助我们改进限免领取", icon: "bubble.left")
+            actionRow("关于我们", subtitle: "版本信息与服务说明", icon: "info.circle")
+        }.padding(16).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var accountActions: some View {
+        Button { Task { await account.signOut() } } label: {
+            Text("退出登录").font(.system(size: 13, weight: .bold)).foregroundStyle(.red)
+                .frame(maxWidth: .infinity).frame(height: 46).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 12))
+        }.buttonStyle(.plain)
+    }
+
+    private var profileEditor: some View {
+        NavigationStack {
+            Form {
+                Section("头像") {
+                    HStack { Spacer(); avatarView(size: 86); Spacer() }
+                    PhotosPicker(selection: $selectedPhoto, matching: .images) { Label("从相册选择头像", systemImage: "photo") }
+                    Button("恢复默认头像", role: .destructive) { avatarBase64 = "" }
+                }
+                Section("昵称") {
+                    TextField("输入你的昵称", text: $profileDraft).onChange(of: profileDraft) { _, value in if value.count > 20 { profileDraft = String(value.prefix(20)) } }
+                }
+            }
+            .navigationTitle("编辑个人资料").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { showProfileEditor = false } }
+                ToolbarItem(placement: .confirmationAction) { Button("保存") { nickname = profileDraft.trimmingCharacters(in: .whitespacesAndNewlines); showProfileEditor = false } }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var settingsSheet: some View {
+        NavigationStack {
+            Form {
+                Section("外观") {
+                    Picker("主题模式", selection: $appearance) {
+                        Text("跟随系统").tag("system")
+                        Text("浅色模式").tag("light")
+                        Text("深色模式").tag("dark")
+                    }.pickerStyle(.inline)
+                }
+                Section("更多设置") {
+                    LabeledContent("签到提醒", value: "后续版本开放")
+                    LabeledContent("游戏发行提醒", value: "后续版本开放")
+                    LabeledContent("社区功能", value: "规划中")
+                }
+            }
+            .navigationTitle("设置").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showSettings = false } } }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var appearanceLabel: String {
+        switch appearance { case "light": return "浅色模式"; case "system": return "跟随系统"; default: return "深色模式" }
+    }
+
+    private func avatarView(size: CGFloat) -> some View {
+        Group {
+            if let data = Data(base64Encoded: avatarBase64), let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Image(systemName: "person.crop.circle.fill").resizable().scaledToFit().foregroundStyle(SteamStyle.cyan).padding(5)
+            }
+        }.frame(width: size, height: size).background(SteamStyle.cardLight, in: Circle()).clipShape(Circle())
+    }
+
+    private func statCell(_ title: String, value: String, icon: String) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon).foregroundStyle(SteamStyle.green)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(value).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                Text(title).font(.system(size: 9)).foregroundStyle(SteamStyle.secondary)
+            }
+            Spacer(minLength: 0)
+        }.frame(maxWidth: .infinity)
+    }
+
+    private func actionRow(_ title: String, subtitle: String, icon: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).foregroundStyle(SteamStyle.cyan).frame(width: 26)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
+                Text(subtitle).font(.system(size: 10)).foregroundStyle(SteamStyle.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").font(.system(size: 10, weight: .bold)).foregroundStyle(SteamStyle.secondary)
+        }.padding(.vertical, 6)
     }
 
     private func modeButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
