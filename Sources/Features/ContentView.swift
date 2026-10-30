@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 import Foundation
 import UIKit
+import Security
 
 // MARK: - 样式
 
@@ -388,83 +389,57 @@ enum SteamAPI {
     // 新增功能：获取当前免费游戏目录
 
     static func fetchFreeToPlayGames() async throws -> [SteamFreeGame] {
+        // 优先读取 Steam 官方首页的“热门免费游玩”分类，避免逐个 appdetails 请求导致整页空白。
         guard let url = makeURL(
+            "https://store.steampowered.com/api/featuredcategories/",
+            queryItems: [
+                URLQueryItem(name: "cc", value: countryCode),
+                URLQueryItem(name: "l", value: language)
+            ]
+        ) else { throw URLError(.badURL) }
+
+        let root = dictionary(try await requestJSON(url))
+        let topFree = dictionary(root["top free"])
+        let items = topFree["items"] as? [[String: Any]] ?? []
+        var results: [SteamFreeGame] = []
+        var seen = Set<Int>()
+        for item in items {
+            let id = intValue(item["id"])
+            let name = string(item["name"])
+            guard id > 0, !name.isEmpty, seen.insert(id).inserted else { continue }
+            let image = string(item["header_image"]).isEmpty
+                ? (string(item["large_capsule_image"]).isEmpty
+                    ? string(item["small_capsule_image"]) : string(item["large_capsule_image"]))
+                : string(item["header_image"])
+            results.append(SteamFreeGame(id: id, name: name, imageURL: image, releaseDate: nil))
+        }
+        if !results.isEmpty { return results }
+
+        // 备用：免费游戏目录。解析 items 与 results_html 中的 appid。
+        guard let fallbackURL = makeURL(
             "https://store.steampowered.com/search/results/",
             queryItems: [
                 URLQueryItem(name: "category1", value: "998"),
                 URLQueryItem(name: "maxprice", value: "free"),
-                URLQueryItem(name: "sort_by", value: "Released_DESC"),
                 URLQueryItem(name: "json", value: "1"),
                 URLQueryItem(name: "count", value: "50"),
                 URLQueryItem(name: "cc", value: countryCode),
                 URLQueryItem(name: "l", value: language)
             ]
-        ) else {
-            throw URLError(.badURL)
-        }
-
-        let root = dictionary(try await requestJSON(url))
-        let items = root["items"] as? [[String: Any]] ?? []
-
-        guard !items.isEmpty else {
-            throw NSError(
-                domain: "SteamAPI",
-                code: -4,
-                userInfo: [NSLocalizedDescriptionKey: "Steam 没有返回免费游戏"]
-            )
-        }
-
-        var results: [SteamFreeGame] = []
-        var seen = Set<Int>()
-
-        for item in items {
-            let id = intValue(item["id"]) != 0
-                ? intValue(item["id"])
-                : intValue(item["appid"])
-
+        ) else { throw URLError(.badURL) }
+        let fallbackRoot = dictionary(try await requestJSON(fallbackURL))
+        let fallbackItems = fallbackRoot["items"] as? [[String: Any]] ?? []
+        for item in fallbackItems {
+            let id = intValue(item["id"]) != 0 ? intValue(item["id"]) : intValue(item["appid"])
             let name = string(item["name"])
-            guard id > 0, !name.isEmpty, !seen.contains(id) else { continue }
-            seen.insert(id)
-
-            do {
-                guard let detailURL = makeURL(
-                    "https://store.steampowered.com/api/appdetails",
-                    queryItems: [
-                        URLQueryItem(name: "appids", value: "\(id)"),
-                        URLQueryItem(name: "cc", value: countryCode),
-                        URLQueryItem(name: "l", value: language)
-                    ]
-                ) else { continue }
-
-                let detailJSON = try await requestJSON(detailURL)
-                let appRoot = dictionary(dictionary(detailJSON)["\(id)"])
-
-                guard appRoot["success"] as? Bool == true else { continue }
-
-                let data = dictionary(appRoot["data"])
-                guard string(data["type"]).lowercased() == "game" else { continue }
-                guard data["is_free"] as? Bool == true else { continue }
-
-                let releaseText = string(dictionary(data["release_date"])["date"])
-
-                results.append(
-                    SteamFreeGame(
-                        id: id,
-                        name: string(data["name"]).isEmpty ? name : string(data["name"]),
-                        imageURL: string(data["header_image"]).isEmpty
-                            ? imageFromItem(item)
-                            : string(data["header_image"]),
-                        releaseDate: parseSteamReleaseDate(releaseText)
-                    )
-                )
-            } catch {
-                continue
-            }
+            guard id > 0, !name.isEmpty, seen.insert(id).inserted else { continue }
+            results.append(SteamFreeGame(id: id, name: name, imageURL: imageFromItem(item), releaseDate: nil))
         }
-
-        return results.sorted {
-            ($0.releaseDate ?? .distantPast) > ($1.releaseDate ?? .distantPast)
+        if results.isEmpty {
+            throw NSError(domain: "SteamAPI", code: -4,
+                userInfo: [NSLocalizedDescriptionKey: "Steam 暂时没有返回免费游戏数据，请稍后刷新。"])
         }
+        return results
     }
 
     // 新增功能：Steam 商店搜索
@@ -472,44 +447,29 @@ enum SteamAPI {
     static func searchGames(_ keyword: String) async throws -> [SteamSearchGame] {
         let term = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return [] }
-
+        // Steam 官方商店搜索 JSON API；不再依赖 search/results 的 HTML 包装结构。
         guard let url = makeURL(
-            "https://store.steampowered.com/search/results/",
+            "https://store.steampowered.com/api/storesearch/",
             queryItems: [
                 URLQueryItem(name: "term", value: term),
-                URLQueryItem(name: "json", value: "1"),
-                URLQueryItem(name: "count", value: "30"),
-                URLQueryItem(name: "cc", value: countryCode),
-                URLQueryItem(name: "l", value: language)
+                URLQueryItem(name: "l", value: language),
+                URLQueryItem(name: "cc", value: countryCode)
             ]
-        ) else {
-            throw URLError(.badURL)
-        }
+        ) else { throw URLError(.badURL) }
 
         let root = dictionary(try await requestJSON(url))
         let items = root["items"] as? [[String: Any]] ?? []
-
         var results: [SteamSearchGame] = []
         var seen = Set<Int>()
-
         for item in items {
-            let id = intValue(item["id"]) != 0
-                ? intValue(item["id"])
-                : intValue(item["appid"])
+            let id = intValue(item["id"])
             let name = string(item["name"])
-
-            guard id > 0, !name.isEmpty, !seen.contains(id) else { continue }
-            seen.insert(id)
-
-            results.append(
-                SteamSearchGame(
-                    id: id,
-                    name: name,
-                    imageURL: imageFromItem(item)
-                )
-            )
+            guard id > 0, !name.isEmpty, seen.insert(id).inserted else { continue }
+            let image = string(item["tiny_image"]).isEmpty
+                ? "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/\(id)/header.jpg"
+                : string(item["tiny_image"])
+            results.append(SteamSearchGame(id: id, name: name, imageURL: image))
         }
-
         return results
     }
 
@@ -863,6 +823,7 @@ final class SteamSearchStore: ObservableObject {
 
         isLoading = true
         errorMessage = nil
+        games = []
         defer { isLoading = false }
 
         do {
@@ -936,6 +897,13 @@ struct ContentView: View {
                     Text("Epic 限免")
                 }
                 .tag(1)
+
+            AccountHomeView()
+                .tabItem {
+                    Image(systemName: "person.crop.circle.fill")
+                    Text("我的")
+                }
+                .tag(2)
         }
         .tint(selectedPlatform == 0 ? SteamStyle.cyan : .white)
         .preferredColorScheme(.dark)
@@ -2257,5 +2225,205 @@ private struct EpicGameCard: View {
         }
 
         return "\(hours)小时 \(minutes)分"
+    }
+}
+
+
+// MARK: - App 自有账户（Supabase Auth REST）
+// 在 Supabase 项目 Settings -> API 中填写 Project URL 与 anon/public key。
+// anon key 可以放在客户端；绝对不要把 service_role key 放进 App。
+private enum SupabaseConfig {
+    static let projectURL = "https://YOUR_PROJECT_ID.supabase.co"
+    static let anonKey = "YOUR_SUPABASE_ANON_KEY"
+    static var isConfigured: Bool {
+        !projectURL.contains("YOUR_PROJECT_ID") && !anonKey.contains("YOUR_SUPABASE")
+    }
+}
+
+private struct SupabaseAuthResponse: Decodable {
+    let access_token: String?
+    let refresh_token: String?
+    let user: SupabaseUser?
+}
+
+private struct SupabaseUser: Decodable {
+    let id: String
+    let email: String?
+}
+
+@MainActor
+private final class AppAccountStore: ObservableObject {
+    @Published var email = ""
+    @Published var isBusy = false
+    @Published var message: String?
+    @Published var isLoggedIn = false
+    private let tokenKey = "app.supabase.access-token"
+
+    init() {
+        if let token = readToken(), !token.isEmpty {
+            isLoggedIn = true
+        }
+    }
+
+    func signUp(email: String, password: String) async {
+        await authenticate(path: "signup", email: email, password: password, isSignUp: true)
+    }
+
+    func signIn(email: String, password: String) async {
+        await authenticate(path: "token?grant_type=password", email: email, password: password, isSignUp: false)
+    }
+
+    private func authenticate(path: String, email: String, password: String, isSignUp: Bool) async {
+        guard SupabaseConfig.isConfigured else {
+            message = "请先在代码顶部 SupabaseConfig 中填写 Supabase Project URL 和 anon/public key。"
+            return
+        }
+        guard let url = URL(string: SupabaseConfig.projectURL + "/auth/v1/" + path) else {
+            message = "Supabase 项目地址无效。"; return
+        }
+        guard email.contains("@"), password.count >= 6 else {
+            message = "请输入有效邮箱，密码至少 6 位。"; return
+        }
+        isBusy = true; message = nil
+        defer { isBusy = false }
+        do {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["email": email, "password": password])
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if !(200...299).contains(status) {
+                let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                message = (body?["msg"] as? String) ?? (body?["message"] as? String) ?? "账户请求失败（HTTP \(status)）"
+                return
+            }
+            let result = try JSONDecoder().decode(SupabaseAuthResponse.self, from: data)
+            if let token = result.access_token {
+                saveToken(token)
+                self.email = result.user?.email ?? email
+                isLoggedIn = true
+                message = isSignUp ? "注册成功，账户已登录。" : "登录成功。"
+            } else if isSignUp {
+                message = "注册请求已提交。请检查邮箱完成验证，然后返回登录。"
+            } else {
+                message = "登录成功，但服务器没有返回访问令牌，请检查 Supabase Auth 配置。"
+            }
+        } catch {
+            message = "网络请求失败：\(error.localizedDescription)"
+        }
+    }
+
+    func signOut() async {
+        guard let token = readToken() else { isLoggedIn = false; return }
+        if SupabaseConfig.isConfigured,
+           let url = URL(string: SupabaseConfig.projectURL + "/auth/v1/logout") {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue(SupabaseConfig.anonKey, forHTTPHeaderField: "apikey")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            _ = try? await URLSession.shared.data(for: request)
+        }
+        deleteToken(); email = ""; isLoggedIn = false; message = "已退出登录。"
+    }
+
+    private func saveToken(_ token: String) {
+        let data = Data(token.utf8)
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: tokenKey]
+        SecItemDelete(query as CFDictionary)
+        var add = query; add[kSecValueData as String] = data
+        SecItemAdd(add as CFDictionary, nil)
+    }
+    private func readToken() -> String? {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: tokenKey, kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    private func deleteToken() {
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: tokenKey] as CFDictionary)
+    }
+}
+
+private struct AccountHomeView: View {
+    @StateObject private var account = AppAccountStore()
+    @State private var isRegisterMode = false
+    @State private var email = ""
+    @State private var password = ""
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                SteamStyle.background.ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 20) {
+                        VStack(spacing: 10) {
+                            Image(systemName: "person.crop.circle.fill")
+                                .font(.system(size: 66)).foregroundStyle(SteamStyle.cyan)
+                            Text("我的账户").font(.system(size: 25, weight: .bold)).foregroundStyle(.white)
+                            Text("独立于 Steam 的 App 账户").font(.system(size: 13)).foregroundStyle(SteamStyle.secondary)
+                        }.padding(.top, 34)
+
+                        if account.isLoggedIn {
+                            VStack(spacing: 14) {
+                                Image(systemName: "checkmark.seal.fill").font(.system(size: 34)).foregroundStyle(SteamStyle.green)
+                                Text("已登录").font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
+                                Text(account.email.isEmpty ? "账户登录状态已保存" : account.email)
+                                    .font(.system(size: 14)).foregroundStyle(SteamStyle.secondary)
+                                Button { Task { await account.signOut() } } label: {
+                                    Text("退出登录").font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                                        .frame(maxWidth: .infinity).frame(height: 48).background(SteamStyle.cardLight, in: RoundedRectangle(cornerRadius: 12))
+                                }
+                            }.padding(20).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+                        } else {
+                            VStack(spacing: 14) {
+                                HStack(spacing: 0) {
+                                    modeButton("登录", selected: !isRegisterMode) { isRegisterMode = false }
+                                    modeButton("注册", selected: isRegisterMode) { isRegisterMode = true }
+                                }.padding(4).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 12))
+                                TextField("邮箱地址", text: $email).textInputAutocapitalization(.never).keyboardType(.emailAddress).autocorrectionDisabled()
+                                    .padding(14).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
+                                SecureField("密码（至少 6 位）", text: $password)
+                                    .padding(14).background(SteamStyle.background, in: RoundedRectangle(cornerRadius: 10)).foregroundStyle(.white)
+                                Button {
+                                    Task {
+                                        if isRegisterMode { await account.signUp(email: email, password: password) }
+                                        else { await account.signIn(email: email, password: password) }
+                                    }
+                                } label: {
+                                    HStack { if account.isBusy { ProgressView().tint(.white) }; Text(isRegisterMode ? "创建账户" : "登录账户") }
+                                        .font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                                        .frame(maxWidth: .infinity).frame(height: 48).background(SteamStyle.blue, in: RoundedRectangle(cornerRadius: 11))
+                                }.disabled(account.isBusy)
+                            }.padding(18).background(SteamStyle.card, in: RoundedRectangle(cornerRadius: 18))
+                        }
+                        if let message = account.message {
+                            Text(message).font(.system(size: 12)).foregroundStyle(SteamStyle.cyan)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(14)
+                                .background(SteamStyle.cardLight, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        Text("账户由本 App 的 Supabase 项目管理，与 Steam 登录、Steam 密码及 Steam 账号无关。请勿将 Supabase service_role 密钥写入客户端。")
+                            .font(.system(size: 11)).foregroundStyle(SteamStyle.secondary).lineSpacing(4)
+                    }.padding(20).frame(maxWidth: 520).frame(maxWidth: .infinity)
+                }
+            }
+            .navigationTitle("我的")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+    }
+
+    private func modeButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 13, weight: .bold)).foregroundStyle(selected ? .white : SteamStyle.secondary)
+                .frame(maxWidth: .infinity).padding(.vertical, 11)
+                .background(selected ? SteamStyle.cardLight : .clear, in: RoundedRectangle(cornerRadius: 9))
+        }.buttonStyle(.plain)
     }
 }
