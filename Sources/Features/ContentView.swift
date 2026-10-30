@@ -881,6 +881,7 @@ private struct SteamCardButtonStyle: ButtonStyle {
 
 struct ContentView: View {
     @State private var selectedPlatform = 0
+    @StateObject private var accountStore = AppAccountStore()
 
     var body: some View {
         TabView(selection: $selectedPlatform) {
@@ -898,7 +899,7 @@ struct ContentView: View {
                 }
                 .tag(1)
 
-            AccountHomeView()
+            AccountHomeView(account: accountStore)
                 .tabItem {
                     Image(systemName: "person.crop.circle.fill")
                     Text("我的")
@@ -907,6 +908,9 @@ struct ContentView: View {
         }
         .tint(selectedPlatform == 0 ? SteamStyle.cyan : .white)
         .preferredColorScheme(.dark)
+        .onOpenURL { url in
+            Task { await accountStore.handleAuthCallback(url) }
+        }
     }
 }
 
@@ -2233,8 +2237,9 @@ private struct EpicGameCard: View {
 // 在 Supabase 项目 Settings -> API 中填写 Project URL 与 anon/public key。
 // anon key 可以放在客户端；绝对不要把 service_role key 放进 App。
 private enum SupabaseConfig {
-    static let projectURL = "https://YOUR_PROJECT_ID.supabase.co"
-    static let anonKey = "YOUR_SUPABASE_ANON_KEY"
+    static let projectURL = "https://eguihbrqafitmdhfimmn.supabase.co"
+    static let anonKey = "sb_publishable_dbIbt7TjTyblrq9JghqI3w_WviPv32M"
+    static let redirectURL = "xianmianlingqu://login-callback"
     static var isConfigured: Bool {
         !projectURL.contains("YOUR_PROJECT_ID") && !anonKey.contains("YOUR_SUPABASE")
     }
@@ -2266,7 +2271,7 @@ private final class AppAccountStore: ObservableObject {
     }
 
     func signUp(email: String, password: String) async {
-        await authenticate(path: "signup", email: email, password: password, isSignUp: true)
+        await authenticate(path: "signup?redirect_to=\(SupabaseConfig.redirectURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? SupabaseConfig.redirectURL)", email: email, password: password, isSignUp: true)
     }
 
     func signIn(email: String, password: String) async {
@@ -2315,6 +2320,43 @@ private final class AppAccountStore: ObservableObject {
         }
     }
 
+    // Supabase 邮箱确认后会通过 URL Scheme 返回 access_token。
+    func handleAuthCallback(_ url: URL) async {
+        guard url.scheme == "xianmianlingqu", url.host == "login-callback" else { return }
+        var values: [String: String] = [:]
+        if let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment {
+            for item in fragment.split(separator: "&") {
+                let pair = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard pair.count == 2 else { continue }
+                let key = String(pair[0]).removingPercentEncoding ?? String(pair[0])
+                let value = String(pair[1]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(pair[1])
+                values[key] = value
+            }
+        }
+        if let error = values["error_description"] ?? values["error"] {
+            message = "邮箱验证未完成：\(error)"
+            return
+        }
+        guard let token = values["access_token"], !token.isEmpty else {
+            message = "已打开验证回调，但没有收到登录令牌。请检查 Supabase 邮件模板和回调设置。"
+            return
+        }
+        saveToken(token)
+        email = emailFromJWT(token) ?? email
+        isLoggedIn = true
+        message = "邮箱验证成功，已登录。"
+    }
+
+    private func emailFromJWT(_ token: String) -> String? {
+        let parts = token.split(separator: ".")
+        guard parts.count > 1 else { return nil }
+        var payload = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 { payload.append("=") }
+        guard let data = Data(base64Encoded: payload),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["email"] as? String
+    }
+
     func signOut() async {
         guard let token = readToken() else { isLoggedIn = false; return }
         if SupabaseConfig.isConfigured,
@@ -2352,7 +2394,7 @@ private final class AppAccountStore: ObservableObject {
 }
 
 private struct AccountHomeView: View {
-    @StateObject private var account = AppAccountStore()
+    @ObservedObject var account: AppAccountStore
     @State private var isRegisterMode = false
     @State private var email = ""
     @State private var password = ""
